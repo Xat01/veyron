@@ -1,0 +1,3 @@
+# Deliberately old pins for SCA testing (fixture only).
+flask==0.12.0
+requests==2.19.0

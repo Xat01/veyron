@@ -1,0 +1,81 @@
+# VEYRON .gitignore
+#
+# The goal: never commit secrets, generated reports, local state, or build
+# artefacts. Reports in particular may contain real findings from real
+# assessments, so they are excluded even though they live under ~/.veyron.
+
+# --- Secrets & local environment --------------------------------------------
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+secrets.*
+credentials.*
+
+# --- Local app state (reports, history, caches, config) ---------------------
+.veyron/
+**/veyron-*.json
+**/veyron-*.sarif
+**/veyron-*.md
+!docs/example-report.md
+reports/
+history.jsonl
+osv_cache.json
+audit-*.log
+*.audit.json
+
+# --- Python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+.venv/
+venv/
+env/
+.Python
+pip-wheel-metadata/
+
+# --- Test / tooling caches ---------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.dmypy.json
+
+# --- Editors / OS ------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Node (only if a fixture installs deps) ---------------------------------
+node_modules/
+package-lock.json
+!fixtures/**/package-lock.json
+npm-debug.log*
+
+# --- Local scanner binaries / tool downloads --------------------------------
+*.exe
+bin/
+!assets/bin/
+
+# --- Temp / logs -------------------------------------------------------------
+*.log
+tmp/
+temp/
+.cache/

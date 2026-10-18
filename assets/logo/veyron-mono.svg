@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="VEYRON monochrome mark">
+  <title>VEYRON monochrome mark</title>
+  <path d="M32 3 L57 11 V31 C57 46.5 46.8 57.3 32 61 C17.2 57.3 7 46.5 7 31 V11 Z"
+        fill="none" stroke="currentColor" stroke-width="3.5" stroke-linejoin="round"/>
+  <path d="M18 21 L32 47 L46 21" fill="none" stroke="currentColor" stroke-width="6"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="32" cy="53" r="2.4" fill="currentColor"/>
+</svg>

@@ -1,0 +1,25 @@
+# Gitleaks configuration for the VEYRON repository itself.
+#
+# VEYRON ships a deliberately-vulnerable test fixture that contains
+# syntactically-fake, obviously-labelled secret-shaped strings (e.g.
+# "FAKE_API_KEY_FOR_TESTS_..."). These exist to exercise secret
+# detection and redaction. They are not, and never were, real
+# credentials: they match no live service and grant no access.
+#
+# The allowlist below scopes the exemption to exactly those fixture
+# files so that a real secret committed anywhere else in the repo is
+# still reported.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Deliberately fake fixture secrets (see fixtures/README)"
+paths = [
+    '''fixtures/vulnerable_app/config_dev\.py''',
+    '''fixtures/vulnerable_app/app\.py''',
+]
+regexes = [
+    '''^FAKE_API_KEY_FOR_TESTS_[0-9a-f]+$''',
+    '''^fake-password-not-real-[0-9]+$''',
+]

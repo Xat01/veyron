@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "veyron"
+version = "0.1.0"
+description = "AI-assisted local application security assessment and vulnerability research engine"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "srivatsa avunoori" }]
+license = { text = "PolyForm-Noncommercial-1.0.0" }
+keywords = ["application-security", "sast", "secret-detection", "dependency-scan", "security-assessment", "ai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: Science/Research",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Utilities",
+]
+
+[project.scripts]
+veyron = "veyron.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["veyron*"]
+exclude = ["tests*", "fixtures*", "examples*", "docs*", "assets*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

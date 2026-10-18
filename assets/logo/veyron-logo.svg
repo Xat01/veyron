@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 96" role="img" aria-label="VEYRON">
+  <title>VEYRON</title>
+  <path d="M40 12 L65 20 V40 C65 55.5 54.8 66.3 40 70 C25.2 66.3 15 55.5 15 40 V20 Z"
+        transform="translate(0,6)" fill="#0f172a" stroke="#38bdf8" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M26 39 L40 65 L54 39" transform="translate(0,6)" fill="none" stroke="#38bdf8" stroke-width="6"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M32.5 39 L40 53 L47.5 39" transform="translate(0,6)" fill="none" stroke="#e2e8f0" stroke-width="3"
+        stroke-linecap="round" stroke-linejoin="round" opacity="0.92"/>
+  <circle cx="40" cy="85" r="2.4" fill="#22c55e"/>
+  <text x="84" y="52" font-family="Segoe UI, Roboto, system-ui, sans-serif" font-size="34"
+        font-weight="700" letter-spacing="6" fill="#f1f5f9">VEYRON</text>
+  <text x="85" y="74" font-family="Segoe UI, Roboto, system-ui, sans-serif" font-size="13"
+        letter-spacing="1.5" fill="#94a3b8">AI-assisted security assessment · evidence over speculation</text>
+</svg>

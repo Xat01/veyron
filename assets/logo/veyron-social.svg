@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-label="VEYRON social preview">
+  <title>VEYRON social preview</title>
+  <rect width="1200" height="630" fill="#0f172a"/>
+  <path d="M600 120 L860 205 V350 C860 470 755 560 600 600 C445 560 340 470 340 350 V205 Z"
+        fill="none" stroke="#38bdf8" stroke-width="10" stroke-linejoin="round" opacity="0.35"/>
+  <path d="M470 250 L600 490 L730 250" fill="none" stroke="#38bdf8" stroke-width="34"
+        stroke-linecap="round" stroke-linejoin="round" opacity="0.9"/>
+  <path d="M530 250 L600 380 L670 250" fill="none" stroke="#e2e8f0" stroke-width="16"
+        stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>
+  <circle cx="600" cy="540" r="12" fill="#22c55e"/>
+  <text x="600" y="90" text-anchor="middle" font-family="Segoe UI, Roboto, system-ui, sans-serif"
+        font-size="58" font-weight="700" letter-spacing="18" fill="#f1f5f9">VEYRON</text>
+  <text x="600" y="620" text-anchor="middle" font-family="Segoe UI, Roboto, system-ui, sans-serif"
+        font-size="22" letter-spacing="3" fill="#94a3b8">AI-assisted application security assessment · local-first · zero-cost</text>
+</svg>
