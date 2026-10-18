@@ -21,7 +21,7 @@
 - Local dashboard on 127.0.0.1: CSRF, CSP, path containment.
 - 123 unit tests; integration tests run when real scanners are installed.
 - Original SVG logo suite and brand specification.
-- PolyForm Noncommercial licence (author: srivatsa avunoori); GitHub Actions workflow for CI (`tests.yml`).
+- PolyForm Noncommercial licence (author: Xat01); GitHub Actions workflow for CI (`tests.yml`).
 
 ## Planned next
 
