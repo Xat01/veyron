@@ -22,4 +22,10 @@ paths = [
 regexes = [
     '''^FAKE_API_KEY_FOR_TESTS_[0-9a-f]+$''',
     '''^fake-password-not-real-[0-9]+$''',
+    # Fake values used by tests/test_redact.py to exercise redaction. The
+    # PEM body and the sample AWS-style key are placeholders, not real
+    # material; they match no service and grant no access. Matching the
+    # body fragment (not the PEM header) keeps real keys reportable.
+    '''MIIEvQIBADANBg''',
+    '''^ABCDEFGHIJKLMNOPQRSTUVWXYZ012345$''',
 ]
