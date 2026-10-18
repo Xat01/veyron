@@ -82,3 +82,57 @@ def test_dast_help_mentions_authorization(capsys):
     out = capsys.readouterr().out
     assert "--authorize" in out
     assert "--execute" in out
+
+
+# -- DASTResult is a dataclass, not a dict (regression: AttributeError) --------
+
+def test_dast_plan_outputs_json_object_not_crash(tmp_path, capsys, monkeypatch):
+    """cmd_dast must serialise DASTResult via asdict() and read fields by
+    attribute access — result.get(...) raised AttributeError on the dataclass."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    code = main(["dast", "http://127.0.0.1:8080/"])
+    data = json.loads(capsys.readouterr().out)
+    assert isinstance(data, dict)
+    assert set(data) >= {"ok", "mode", "target", "authorized_ok", "plan"}
+    assert data["mode"] == "plan"
+    # planning without --authorize must be denied and exit 3
+    assert data["authorized_ok"] is False
+    assert code == 3
+
+
+def test_dast_plan_authorized_allowlisted_exits_zero(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    code = main(["dast", "http://127.0.0.1:8080/", "--authorize"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["authorized_ok"] is True
+    assert data["mode"] == "plan"
+    assert data["checks"] == []          # dry-run: no requests sent
+    assert code == 0
+
+
+def test_dast_non_allowlisted_target_rejected_without_requests(tmp_path, capsys, monkeypatch):
+    """localhost:3001 is not in the default allowlist: even with --authorize
+    the target is rejected, no requests are sent, and exit code is 3."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    code = main(["dast", "http://localhost:3001/", "--authorize"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["authorized_ok"] is False
+    assert data["checks"] == []
+    assert any("allowlist" in s for s in data["skipped"])
+    assert code == 3
+
+
+def test_dast_execute_without_authorize_stays_plan_mode(tmp_path, capsys, monkeypatch):
+    """--execute alone is not consent: run_dast downgrades to plan mode,
+    denies authorization, and sends no requests."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    code = main(["dast", "http://127.0.0.1:8080/", "--execute"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["mode"] == "plan"
+    assert data["authorized_ok"] is False
+    assert data["checks"] == []
+    assert code == 3

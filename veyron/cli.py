@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -248,12 +249,14 @@ def cmd_dast(args: argparse.Namespace, cfg: Config) -> int:
         execute=execute,
         authorized=bool(args.authorize),
     )
-    print(json.dumps(result, indent=2, default=str))
-    if not result.get("authorized_ok"):
+    # DASTResult is a dataclass: serialise with asdict() and read fields
+    # via attribute access (there is no .get()).
+    print(json.dumps(asdict(result), indent=2, default=str))
+    if not result.authorized_ok:
         return 3
     if not execute:
         return 0
-    return 0 if result.get("ok") else 1
+    return 0 if result.ok else 1
 
 
 def cmd_dashboard(args: argparse.Namespace, cfg: Config) -> int:

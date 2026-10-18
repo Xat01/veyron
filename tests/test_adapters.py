@@ -138,7 +138,12 @@ def test_gitleaks_finding_redacts_secret(tmp_path, monkeypatch):
         "Commit": "deadbeefcafe1234deadbeefcafe1234deadbeef",
     }
     def fake_run(args, **kwargs):
-        return CommandResult(args=args, returncode=1, stdout=json.dumps([leak]), stderr="")
+        if "--report-path" in args:
+            Path(args[args.index("--report-path") + 1]).write_text(
+                json.dumps([leak]), encoding="utf-8")
+            return CommandResult(args=args, returncode=1, stdout="", stderr="")
+        # version() probe runs before report parsing: treat as clean.
+        return CommandResult(args=args, returncode=0, stdout="8.18.4", stderr="")
     monkeypatch.setattr(gitleaks_mod, "run_command", fake_run)
     monkeypatch.setattr(gitleaks_mod, "which", lambda exe: "/usr/bin/gitleaks")
     res = GitleaksAdapter().scan(tmp_path)
@@ -154,7 +159,12 @@ def test_gitleaks_finding_redacts_secret(tmp_path, monkeypatch):
 
 def test_gitleaks_clean_exit_zero(tmp_path, monkeypatch):
     def fake_run(args, **kwargs):
-        return CommandResult(args=args, returncode=0, stdout="", stderr="")
+        if "--report-path" in args:
+            Path(args[args.index("--report-path") + 1]).write_text(
+                json.dumps([]), encoding="utf-8")
+            return CommandResult(args=args, returncode=0, stdout="", stderr="")
+        # version() probe runs before report parsing: treat as clean.
+        return CommandResult(args=args, returncode=0, stdout="8.18.4", stderr="")
     monkeypatch.setattr(gitleaks_mod, "run_command", fake_run)
     monkeypatch.setattr(gitleaks_mod, "which", lambda exe: "/usr/bin/gitleaks")
     res = GitleaksAdapter().scan(tmp_path)
