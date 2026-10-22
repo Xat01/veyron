@@ -37,6 +37,17 @@ from urllib.parse import urljoin, urlparse
 from .net.client import HttpClient, HttpResponse, SENSITIVE_KEYS, redact_url
 from .net.scope import Scope
 
+from .assessment import (
+    AssessmentSpec,
+    Identity,
+    PROFILE_CONTROLLED_VALIDATION,
+    PROFILE_LAB_EXPLOIT,
+    PROFILE_PASSIVE,
+    PROFILE_SAFE_ACTIVE,
+    normalize_profile,
+)
+from .checks import CheckContext, run_checks
+from .checks.callback import CallbackListener
 from .config import DASTConfig
 
 USER_AGENT = "VEYRON-DAST/0.1 (authorised security assessment; contact: local operator)"
@@ -97,6 +108,7 @@ class DASTResult:
     skipped: list[str] = field(default_factory=list)
     budget: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    authorization: dict[str, Any] = field(default_factory=dict)
 
 
 def host_in_allowlist(url: str, allowlist: list[str]) -> bool:
@@ -147,17 +159,21 @@ def allowlist_entry_for_url(url: str) -> str | None:
 
 
 class Budget:
-    """Request budget + deadline enforcement."""
+    """Request budget + deadline + emergency-stop enforcement."""
 
     def __init__(self, cfg: DASTConfig):
         self.max_requests = cfg.max_requests
         self.max_seconds = cfg.max_minutes * 60
         self.deadline = time.monotonic() + self.max_seconds
         self.used = 0
+        self.stop_file = cfg.stop_file
         self.exhausted_reason: str | None = None
 
     def consume(self) -> bool:
         if self.exhausted_reason:
+            return False
+        if self.stop_file and Path(self.stop_file).exists():
+            self.exhausted_reason = "emergency stop requested"
             return False
         if self.used >= self.max_requests:
             self.exhausted_reason = "request budget exhausted"
@@ -386,8 +402,63 @@ def _scope_for_allowlist(cfg: DASTConfig) -> Scope:
     return Scope.from_allowlist([entry for entry in cfg.allowlist if entry.strip()])
 
 
+def assessment_spec_from_dast(cfg: DASTConfig) -> AssessmentSpec:
+    """Convert DAST settings into the shared authorization model."""
+    identities = []
+    for item in cfg.identities:
+        if isinstance(item, dict) and item.get("name"):
+            identities.append(Identity(
+                name=str(item["name"]),
+                headers={str(k): str(v) for k, v in dict(item.get("headers", {})).items()},
+                privilege=str(item.get("privilege", "low")),
+            ))
+    return AssessmentSpec(
+        profile=normalize_profile(cfg.profile),
+        authorized_hosts=list(cfg.allowlist),
+        permitted_paths=list(cfg.permitted_paths),
+        exclusions=list(cfg.exclusions),
+        max_requests=cfg.max_requests,
+        max_rate_per_second=cfg.rate_limit_per_second,
+        connection_timeout_seconds=float(cfg.timeout_seconds),
+        deadline_seconds=cfg.max_minutes * 60,
+        max_concurrency=cfg.max_concurrency,
+        evidence_retention=cfg.evidence_retention,
+        stop_file=cfg.stop_file,
+        lab_environment=cfg.lab_environment,
+        identities=identities,
+        callback_url=cfg.callback_url,
+        access_control_rules=list(cfg.access_control_rules),
+    )
+
+
+def _build_http_client(cfg: DASTConfig, spec: AssessmentSpec | None = None) -> HttpClient:
+    """Build the one shared client used for the whole DAST run."""
+    try:
+        from .config import Config as _Cfg
+
+        _live_cfg = _Cfg.load()
+        _proxy = getattr(_live_cfg, "proxy", None)
+        proxy_cfg = _proxy if _proxy is not None and _proxy.configured else None
+        _network = getattr(_live_cfg, "network", None)
+        verify_tls = getattr(_network, "verify_tls", True)
+    except Exception:  # pragma: no cover — config load failure means proxy unset
+        proxy_cfg = None
+        verify_tls = True
+    return HttpClient(
+        scope=(spec or assessment_spec_from_dast(cfg)).scope(),
+        proxy=proxy_cfg,
+        timeout=cfg.timeout_seconds,
+        verify_tls=verify_tls,
+        max_requests=cfg.max_requests,
+        rate_limit_per_second=cfg.rate_limit_per_second,
+        max_redirects=cfg.max_redirects,
+        user_agent=USER_AGENT,
+    )
+
+
 def _safe_request(url: str, cfg: DASTConfig, budget: Budget, audit: list[AuditRecord],
-                  *, method: str = "GET") -> tuple[int | None, dict[str, str], bytes, str | None]:
+                  *, method: str = "GET",
+                  client: HttpClient | None = None) -> tuple[int | None, dict[str, str], bytes, str | None]:
     """GET a URL via the shared HttpClient, preserving the same return shape.
 
     Scope, proxy routing with fail-closed behaviour, redirect validation,
@@ -404,27 +475,9 @@ def _safe_request(url: str, cfg: DASTConfig, budget: Budget, audit: list[AuditRe
                                  budget.exhausted_reason or "budget"))
         return None, {}, b"", budget.exhausted_reason or "budget"
 
-    scope = _scope_for_allowlist(cfg)
-    try:
-        from .config import Config as _Cfg
-
-        _live_cfg = _Cfg.load()
-        proxy_cfg = _live_cfg.proxy if _live_cfg.proxy.configured else None
-    except Exception:  # pragma: no cover — config load failure means proxy unset
-        proxy_cfg = None
-
     audit.append(AuditRecord(AuditRecord.now(), url, "REQUEST", True))
 
-    client = HttpClient(
-        scope=scope,
-        proxy=proxy_cfg,
-        timeout=cfg.timeout_seconds,
-        verify_tls=True,
-        max_requests=cfg.max_requests,
-        rate_limit_per_second=cfg.rate_limit_per_second,
-        max_redirects=cfg.max_redirects,
-        user_agent=USER_AGENT,
-    )
+    client = client or _build_http_client(cfg)
     response: HttpResponse = client.request(method, url, allow_redirects=False)
 
     status = response.status if response.ok else None
@@ -447,15 +500,28 @@ def run_dast(cfg: DASTConfig, *, target_url: str, execute: bool, authorized: boo
              profile: str | None = None) -> DASTResult:
     """Run (or plan) controlled dynamic checks against an authorised target."""
 
-    if profile in {"passive", "safe-active"}:
-        cfg.profile = profile
+    cfg.profile = normalize_profile(profile or cfg.profile).lower().replace("_", "-")
     # Execution requires all three: explicit --execute, explicit --authorize,
     # and dry_run disabled in config is NOT required — the CLI flags are the
     # explicit consent signal, and scope is still enforced by the allowlist.
+    if cfg.profile in {"controlled-validation", "lab-exploit"} and not (
+        execute and authorized
+    ):
+        # Validation profiles are never silently downgraded to passive: the
+        # caller is told that validation was not permitted.
+        cfg.profile = PROFILE_CONTROLLED_VALIDATION.lower().replace("_", "-")
     execute = bool(execute) and bool(authorized)
     mode = "execute" if execute else "plan"
     audit: list[AuditRecord] = []
     budget = Budget(cfg)
+    spec = assessment_spec_from_dast(cfg)
+    spec_problems: list[str] = []
+    if execute:
+        allowed, spec_problems = spec.authorize(execute=True, confirmation=True)
+        if not allowed:
+            execute = False
+            mode = "plan"
+            spec_problems = list(spec_problems)
 
     scope_ok = host_in_allowlist(target_url, cfg.allowlist)
     authorized_ok = bool(authorized) and scope_ok
@@ -474,15 +540,21 @@ def run_dast(cfg: DASTConfig, *, target_url: str, execute: bool, authorized: boo
         authorized_ok=authorized_ok,
         profile=cfg.profile,
         budget=budget.snapshot(),
+        authorization=spec.summary(),
     )
 
     if not authorized:
         result.skipped.append(
             "Execution requires explicit authorisation (--authorize). Planning mode only."
         )
-    if not scope_ok:        result.skipped.append(
+    if not scope_ok:
+        result.skipped.append(
             f"Target {target_url} is outside the allowlist {cfg.allowlist}. "
             "Add it to VEYRON_DAST_ALLOWLIST only if you are authorised to test it."
+        )
+    if spec_problems:
+        result.skipped.append(
+            "Authorisation model rejected active execution: " + "; ".join(spec_problems)
         )
     if not execute:
         result.plan = _build_plan(target_url, cfg)
@@ -500,6 +572,48 @@ def run_dast(cfg: DASTConfig, *, target_url: str, execute: bool, authorized: boo
     # -- executed safe checks --------------------------------------------------
     result.checks = _run_safe_checks(cfg, target_url, budget, audit)
     result.findings = _interpret(result.checks)
+
+    # -- modular active checks (profile-gated) --------------------------------
+    if cfg.profile in {"safe-active", "controlled-validation", "lab-exploit"} \
+            and not budget.exhausted_reason:
+        urls: list[str] = []
+        for check in result.checks:
+            if check.get("url"):
+                urls.append(check["url"])
+            urls.extend(check.get("links", []))
+        client = _build_http_client(cfg, spec)
+        # SSRF validation needs a concrete, observable callback signal. VEYRON
+        # runs its own loopback listener for this; it never probes cloud
+        # metadata or third-party infrastructure. An operator-supplied
+        # callback_url cannot be observed by us, so it is recorded as a run
+        # note rather than treated as a validating signal.
+        listener = None
+        callback = None
+        if cfg.callback_url:
+            result.skipped.append(
+                "callback_url is set but is not observed by VEYRON; SSRF "
+                "call-back validation is skipped for this run"
+            )
+        else:
+            listener = CallbackListener().start()
+            callback = listener
+        ctx = CheckContext(
+            client=client,
+            spec=spec,
+            consume=budget.consume,
+            stop=lambda: bool(cfg.stop_file and Path(cfg.stop_file).exists()),
+            callback=callback,
+        )
+        try:
+            extra, check_errors = run_checks(ctx, urls)
+            result.findings.extend(extra)
+            result.errors.extend(check_errors)
+        except Exception as exc:  # noqa: BLE001 - never lose the passive results
+            result.errors.append(f"active checks failed: {type(exc).__name__}: {exc}")
+        finally:
+            if listener is not None:
+                listener.stop()
+
     result.audit = [asdict(a) for a in audit]
     result.budget = budget.snapshot()
     result.ok = True
@@ -580,6 +694,7 @@ def _run_safe_checks(cfg: DASTConfig, target_url: str, budget: Budget,
     delay = 1.0 / max(cfg.rate_limit_per_second, 0.1)
     seen: set[str] = set()
     queue: list[str] = []
+    client = _build_http_client(cfg)
     safe_active = cfg.profile == "safe-active"
     # The root page is always fetched; count it against the crawl cap.
     pages_fetched = 1 if safe_active else 0
@@ -592,7 +707,9 @@ def _run_safe_checks(cfg: DASTConfig, target_url: str, budget: Budget,
             break
         url = plan_step["url"]
         method = plan_step["method"]
-        status, headers, body, err = _safe_request(url, cfg, budget, audit, method=method)
+        status, headers, body, err = _safe_request(
+            url, cfg, budget, audit, method=method, client=client
+        )
         check = _make_check(url, method, status, headers, body, err, cfg, root_url)
         if check.get("redirect_blocked_as_out_of_scope"):
             audit.append(AuditRecord(AuditRecord.now(), headers.get("location") or "",
@@ -621,7 +738,9 @@ def _run_safe_checks(cfg: DASTConfig, target_url: str, budget: Budget,
                 audit.append(AuditRecord(AuditRecord.now(), url, "BLOCKED_OUT_OF_SCOPE", False,
                                          "discovered link outside allowlist"))
                 continue
-            status, headers, body, err = _safe_request(url, cfg, budget, audit)
+            status, headers, body, err = _safe_request(
+                url, cfg, budget, audit, client=client
+            )
             check = _make_check(url, "GET", status, headers, body, err, cfg, root_url)
             checks.append(check)
             pages_fetched += 1
