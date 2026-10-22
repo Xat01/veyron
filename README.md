@@ -147,6 +147,9 @@ never required for scanning.
   targets only; localhost by default.
 - The `safe-active` website profile crawls only same-origin links and issues
   only `GET`/`OPTIONS`; it never submits forms or injects payloads.
+- `veyron dast <url> -y` scopes the exact URL typed for that run and executes
+  it. The persistent allowlist is unchanged; without `-y`/`--authorize` a
+  non-allowlisted target is still refused.
 - Every outbound request passes the shared network layer: scope check →
   DNS resolution → destination-address validation → connect.
 - Cloud-metadata and link-local ranges are blocked by default.

@@ -22,6 +22,9 @@
   crawl (default 10 pages), passive HTML link/form/mixed-content analysis,
   `security.txt` and `OPTIONS` probes, new DETECTED-only findings. No
   exploitation, fuzzing, or form submission.
+- Direct CLI scanning: `veyron dast <url> -y` scopes the typed URL for the
+  run and executes without editing config; output is a human-readable
+  summary by default (`--json` for machine output).
 - Local dashboard on 127.0.0.1: CSRF, CSP, path containment.
 - Shared network layer (`veyron/net/`): one HTTP client for every outbound
   request — scope enforcement, DNS resolution + destination-address

@@ -82,6 +82,7 @@ def test_dast_help_mentions_authorization(capsys):
     out = capsys.readouterr().out
     assert "--authorize" in out
     assert "--execute" in out
+    assert "--yes" in out
 
 
 # -- DASTResult is a dataclass, not a dict (regression: AttributeError) --------
@@ -91,7 +92,7 @@ def test_dast_plan_outputs_json_object_not_crash(tmp_path, capsys, monkeypatch):
     attribute access — result.get(...) raised AttributeError on the dataclass."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    code = main(["dast", "http://127.0.0.1:8080/"])
+    code = main(["dast", "http://127.0.0.1:8080/", "--json"])
     data = json.loads(capsys.readouterr().out)
     assert isinstance(data, dict)
     assert set(data) >= {"ok", "mode", "target", "authorized_ok", "plan"}
@@ -104,7 +105,7 @@ def test_dast_plan_outputs_json_object_not_crash(tmp_path, capsys, monkeypatch):
 def test_dast_plan_authorized_allowlisted_exits_zero(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    code = main(["dast", "http://127.0.0.1:8080/", "--authorize"])
+    code = main(["dast", "http://127.0.0.1:8080/", "--authorize", "--json"])
     data = json.loads(capsys.readouterr().out)
     assert data["authorized_ok"] is True
     assert data["mode"] == "plan"
@@ -112,12 +113,36 @@ def test_dast_plan_authorized_allowlisted_exits_zero(tmp_path, capsys, monkeypat
     assert code == 0
 
 
-def test_dast_non_allowlisted_target_rejected_without_requests(tmp_path, capsys, monkeypatch):
-    """localhost:3001 is not in the default allowlist: even with --authorize
-    the target is rejected, no requests are sent, and exit code is 3."""
+def test_dast_authorize_scopes_cli_target_for_this_run(tmp_path, capsys, monkeypatch):
+    """--authorize scopes the exact URL typed on the command line, so no
+    config edit is needed. Without --execute it still only plans."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    code = main(["dast", "http://localhost:3001/", "--authorize"])
+    code = main(["dast", "http://localhost:3001/", "--authorize", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["authorized_ok"] is True
+    assert data["mode"] == "plan"
+    assert data["checks"] == []
+    assert code == 0
+
+
+def test_dast_yes_runs_without_allowlist_config(tmp_path, capsys, monkeypatch):
+    """-y is the nmap-style one-flag run: scope + consent + execute."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    code = main(["dast", "http://localhost:3001/", "-y", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["authorized_ok"] is True
+    assert data["mode"] == "execute"
+    assert data["checks"]  # attempts are recorded even when the port is closed
+    assert code == 0
+
+
+def test_dast_non_allowlisted_without_consent_still_rejected(tmp_path, capsys, monkeypatch):
+    """No --authorize/-y means no scope expansion and no traffic."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    code = main(["dast", "http://localhost:3001/", "--json"])
     data = json.loads(capsys.readouterr().out)
     assert data["authorized_ok"] is False
     assert data["checks"] == []
@@ -130,9 +155,22 @@ def test_dast_execute_without_authorize_stays_plan_mode(tmp_path, capsys, monkey
     denies authorization, and sends no requests."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
-    code = main(["dast", "http://127.0.0.1:8080/", "--execute"])
+    code = main(["dast", "http://127.0.0.1:8080/", "--execute", "--json"])
     data = json.loads(capsys.readouterr().out)
     assert data["mode"] == "plan"
     assert data["authorized_ok"] is False
     assert data["checks"] == []
     assert code == 3
+
+
+def test_dast_summary_output_is_human_readable(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    code = main(["dast", "http://127.0.0.1:8080/", "--authorize"])
+    out = capsys.readouterr().out
+    assert "controlled website assessment" in out
+    assert "target:" in out
+    assert "profile:" in out
+    assert "plan:" in out
+    assert not out.lstrip().startswith("{")
+    assert code == 0

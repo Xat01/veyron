@@ -133,6 +133,19 @@ def e_host_matches(entry: str, host: str) -> bool:
     return entry == host
 
 
+def allowlist_entry_for_url(url: str) -> str | None:
+    """Return the explicit ``host:port`` entry for an http(s) URL.
+
+    Used by the CLI so an operator can authorise the exact URL they typed
+    without editing the persistent allowlist first.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return f"{parsed.hostname.lower()}:{port}"
+
+
 class Budget:
     """Request budget + deadline enforcement."""
 

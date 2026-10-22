@@ -75,7 +75,11 @@ def _build_parser() -> argparse.ArgumentParser:
     dast.add_argument("--execute", action="store_true",
                       help="Actually execute safe checks against the authorised target")
     dast.add_argument("--authorize", action="store_true",
-                      help="Confirm you are authorised to test the target")
+                      help="Confirm you are authorised to test the target; if it "
+                           "is not allowlisted, it is scoped for this run only")
+    dast.add_argument("-y", "--yes", action="store_true",
+                      help="Shorthand for --execute --authorize: scope the given "
+                           "target and run the assessment")
     dast.add_argument("--profile", choices=("passive", "safe-active"), default=None,
                       help="Assessment profile: passive (default) or safe-active "
                            "(same-origin crawl + read-only HTML/form analysis)")
@@ -247,23 +251,76 @@ def cmd_ai(args: argparse.Namespace, cfg: Config) -> int:
     return 2
 
 
+def _print_dast_result(result: Any) -> None:
+    _print(f"{APP_DISPLAY_NAME} - controlled website assessment")
+    _print(f"  target:     {result.target}")
+    _print(f"  profile:    {result.profile}    mode: {result.mode}")
+    _print(f"  authorised: {result.authorized_ok}")
+
+    if result.mode == "plan":
+        _print(f"  plan:       {len(result.plan)} steps, no requests sent")
+        for step in result.plan:
+            _print(f"    {step['step']}. {step['method']} {step['url']}")
+        if result.authorized_ok:
+            _print("  run with -y to execute")
+        else:
+            _print("  refused: target is not authorised/allowlisted")
+    else:
+        used = result.budget.get("used", 0)
+        maximum = result.budget.get("max_requests", "?")
+        _print(f"  requests:   {used}/{maximum}    checks: {len(result.checks)}")
+        if result.findings:
+            _print(f"  findings:   {len(result.findings)}")
+            for finding in result.findings:
+                _print(f"    [{finding['severity'].upper()}] {finding['title']}")
+                if finding.get("detail"):
+                    _print(f"      {finding['detail']}")
+        else:
+            _print("  findings:   none from the safe checks")
+        blocked = sum(
+            1 for record in result.audit
+            if record["action"] in {"DENIED", "BLOCKED_OUT_OF_SCOPE", "REDIRECT_BLOCKED"}
+        )
+        if blocked:
+            _print(f"  blocked:    {blocked} out-of-scope/denied event(s)")
+        for error in result.errors:
+            _print(f"  error:      {error}")
+
+    for note in result.skipped:
+        _print(f"  note:       {note}")
+
+
 def cmd_dast(args: argparse.Namespace, cfg: Config) -> int:
-    from .dast import run_dast
+    from .dast import allowlist_entry_for_url, host_in_allowlist, run_dast
 
     if not args.target_url:
         print("error: target URL required", file=sys.stderr)
         return 2
-    execute = bool(args.execute)
+
+    execute = bool(args.execute or args.yes)
+    authorized = bool(args.authorize or args.yes)
+    # Direct-CLI ergonomics: an explicit authorisation for the URL on the
+    # command line scopes that exact host:port for this run. The persistent
+    # allowlist is untouched, and without --authorize/-y a non-allowlisted
+    # target is still refused.
+    if authorized and not host_in_allowlist(args.target_url, cfg.dast.allowlist):
+        entry = allowlist_entry_for_url(args.target_url)
+        if entry:
+            cfg.dast.allowlist = list(cfg.dast.allowlist) + [entry]
+
     result = run_dast(
         cfg.dast,
         target_url=args.target_url,
         execute=execute,
-        authorized=bool(args.authorize),
+        authorized=authorized,
         profile=getattr(args, "profile", None),
     )
     # DASTResult is a dataclass: serialise with asdict() and read fields
     # via attribute access (there is no .get()).
-    print(json.dumps(asdict(result), indent=2, default=str))
+    if getattr(args, "json", False):
+        print(json.dumps(asdict(result), indent=2, default=str))
+    else:
+        _print_dast_result(result)
     if not result.authorized_ok:
         return 3
     if not execute:
