@@ -193,23 +193,13 @@ def _redact_location(loc: str) -> str:
 def _scope_for_allowlist(cfg: DASTConfig) -> Scope:
     """Build a Scope from the DAST allowlist entries.
 
-    The DAST allowlist and the shared Scope are derived from the same
+    `Scope.from_allowlist` uses the same rule as `host_in_allowlist`: a bare
+    host covers only the scheme default ports (80/443), and a `host:port`
+    entry covers exactly that port. Both are derived from the same
     `cfg.allowlist`, so the set of hosts DAST is willing to talk to and the
     set the HTTP client will actually contact are identical.
     """
-    entries: list[str] = []
-    for entry in cfg.allowlist:
-        entry = entry.strip()
-        if not entry:
-            continue
-        if ":" in entry:
-            entries.append(entry)
-        else:
-            # A bare host means "any port" for DAST's allowlist check.
-            entries.append(entry)
-            entries.append(f"{entry}:80")
-            entries.append(f"{entry}:443")
-    return Scope.from_allowlist(entries)
+    return Scope.from_allowlist([entry for entry in cfg.allowlist if entry.strip()])
 
 
 def _safe_request(url: str, cfg: DASTConfig, budget: Budget, audit: list[AuditRecord]) -> tuple[int | None, dict[str, str], bytes, str | None]:
@@ -257,6 +247,10 @@ def _safe_request(url: str, cfg: DASTConfig, budget: Budget, audit: list[AuditRe
     # value that reaches the check output is sanitised by the caller.
     headers = {k.lower(): v for k, v in response.headers.items()}
     error = response.error
+    if error and response.error_kind:
+        # Keep the transport failure kind visible: "proxy_error: ..." tells
+        # the operator the request never left the proxy layer.
+        error = f"{response.error_kind}: {error}"
     if status is None:
         audit.append(AuditRecord(AuditRecord.now(), url, "ERROR", True, (error or "")[:200]))
     else:

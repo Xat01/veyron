@@ -41,25 +41,6 @@ class AIResult:
 # Failure kinds that are safe to retry (bounded by config.max_retries).
 RETRYABLE = {"unreachable", "rate_limit", "http_error"}
 
-# Transport-level failures reported by the shared HTTP client. The original
-# urllib implementation reported every one of these as "unreachable", and
-# the retry policy depends on that: they are transient by nature. The
-# shared client uses finer-grained kinds internally, so they are mapped
-# back onto the documented AI failure-kind set here.
-_TRANSPORT_FAILURE_KINDS = frozenset({
-    "connection_error",
-    "timeout",
-    "dns_error",
-    "proxy_error",
-    "redirect_blocked",
-    "too_many_redirects",
-    "unsupported_scheme",
-    "invalid_url",
-    "address_blocked",
-    "cancelled",
-    "deadline_exceeded",
-})
-
 
 def _status_to_failure_kind(status: int) -> str:
     """Classify a provider HTTP status into an AI failure kind."""
@@ -203,10 +184,16 @@ class AIAdapter:
         # ok=True for any completed exchange, including 4xx/5xx — so the
         # status code has to be classified explicitly.
         if not response.ok:
-            kind = response.error_kind or ""
-            if kind not in _TRANSPORT_FAILURE_KINDS:
-                kind = "unreachable"
+            # Transport-level failure. The shared client reports finer-grained
+            # kinds internally (proxy_error, dns_error, timeout, ...); the
+            # documented AI failure-kind set collapses them all into
+            # "unreachable", which is retryable — the same classification the
+            # original urllib implementation produced. The precise kind is
+            # kept in the error message for diagnosis.
+            kind = "unreachable"
             detail = response.error or ""
+            if response.error_kind:
+                detail = f"{response.error_kind}: {detail}" if detail else response.error_kind
             return AIResult(ok=False, failure_kind=kind, error=detail[:300])
 
         status = response.status or 200
