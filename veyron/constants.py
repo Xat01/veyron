@@ -119,6 +119,8 @@ SUPPORTED_MANIFEST_FILES = frozenset(
 )
 
 # Finding validation states (see SPEC section 6.9).
+# The first four are the detection lifecycle; the remaining states describe
+# outcomes that are not evidence of absence.
 FINDING_STATES = {
     "DETECTED",
     "ANALYSED",
@@ -126,6 +128,9 @@ FINDING_STATES = {
     "VALIDATED",
     "FALSE_POSITIVE",
     "INCONCLUSIVE",
+    "BLOCKED_BY_SCOPE",
+    "VALIDATION_NOT_PERMITTED",
+    "REQUIRES_MANUAL_REVIEW",
 }
 
 # Severity levels used for normalisation.

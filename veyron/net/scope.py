@@ -184,12 +184,23 @@ class Scope:
         return False
 
     def path_allowed(self, path: str) -> bool:
+        # Normalise before prefix matching so ``/allowed/../admin`` and
+        # encoded traversal cannot satisfy a permitted-path rule.  If the raw
+        # path contains traversal or encoded separators we refuse it outright:
+        # the server's normalisation may differ from ours.
+        raw = path or "/"
+        lowered = raw.lower()
+        if ".." in lowered or "%2e" in lowered or "%2f" in lowered or "%5c" in lowered or "\\" in raw:
+            return False
+        normalised = "/" + "/".join(
+            part for part in raw.split("/") if part not in {"", "."}
+        )
         for excluded in self.excluded_paths:
-            if path.startswith(excluded):
+            if normalised.startswith(excluded):
                 return False
         if not self.allowed_paths:
             return True
-        return any(path.startswith(prefix) for prefix in self.allowed_paths)
+        return any(normalised.startswith(prefix) for prefix in self.allowed_paths)
 
     def check_url(self, url: str) -> ScopeDecision:
         """Check a URL against scheme, host, port and path rules."""

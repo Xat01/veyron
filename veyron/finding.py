@@ -65,6 +65,16 @@ class Finding:
     line: int | None
     evidence: str
     remediation: str | None = None
+    # Professional report fields. All optional; reports state when unknown
+    # rather than inventing content.
+    asset: str | None = None
+    endpoint: str | None = None
+    expected_behavior: str | None = None
+    observed_behavior: str | None = None
+    impact: str | None = None
+    preconditions: str | None = None
+    reproduction: str | None = None
+    verification: str | None = None
     rule_id: str | None = None
     tool: str | None = None
     tool_version: str | None = None
@@ -73,6 +83,10 @@ class Finding:
     validation_history: list[dict[str, Any]] = field(default_factory=list)
     related_ids: list[str] = field(default_factory=list)
     ai_summary: str | None = None
+    # Structured, sanitised validation evidence (see veyron.validation).
+    # Kept separate from `evidence` so reports can distinguish scanner
+    # output from evidence the validation engine actually observed.
+    validation_evidence: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -96,12 +110,22 @@ class Finding:
         if new_state not in FINDING_STATES:
             return False
         allowed = {
-            "DETECTED": {"ANALYSED", "INCONCLUSIVE", "FALSE_POSITIVE", "CORROBORATED", "VALIDATED"},
-            "ANALYSED": {"CORROBORATED", "INCONCLUSIVE", "FALSE_POSITIVE", "VALIDATED"},
-            "CORROBORATED": {"VALIDATED", "INCONCLUSIVE", "FALSE_POSITIVE"},
-            "INCONCLUSIVE": {"ANALYSED", "CORROBORATED", "VALIDATED", "FALSE_POSITIVE"},
+            "DETECTED": {"ANALYSED", "INCONCLUSIVE", "FALSE_POSITIVE", "CORROBORATED", "VALIDATED",
+                         "BLOCKED_BY_SCOPE", "VALIDATION_NOT_PERMITTED",
+                         "REQUIRES_MANUAL_REVIEW"},
+            "ANALYSED": {"CORROBORATED", "INCONCLUSIVE", "FALSE_POSITIVE", "VALIDATED",
+                         "BLOCKED_BY_SCOPE", "VALIDATION_NOT_PERMITTED",
+                         "REQUIRES_MANUAL_REVIEW"},
+            "CORROBORATED": {"VALIDATED", "INCONCLUSIVE", "FALSE_POSITIVE",
+                             "REQUIRES_MANUAL_REVIEW"},
+            "INCONCLUSIVE": {"ANALYSED", "CORROBORATED", "VALIDATED", "FALSE_POSITIVE",
+                             "REQUIRES_MANUAL_REVIEW"},
             "VALIDATED": {"INCONCLUSIVE"},
             "FALSE_POSITIVE": {"INCONCLUSIVE"},
+            "BLOCKED_BY_SCOPE": {"ANALYSED", "INCONCLUSIVE"},
+            "VALIDATION_NOT_PERMITTED": {"INCONCLUSIVE"},
+            "REQUIRES_MANUAL_REVIEW": {"ANALYSED", "CORROBORATED", "VALIDATED",
+                                       "INCONCLUSIVE", "FALSE_POSITIVE"},
         }
         if new_state == self.validation_status:
             return False
@@ -231,6 +255,9 @@ VALIDATION_FACTOR = {
     "DETECTED": 0.8,
     "INCONCLUSIVE": 0.6,
     "FALSE_POSITIVE": 0.0,
+    "BLOCKED_BY_SCOPE": 0.8,
+    "VALIDATION_NOT_PERMITTED": 0.8,
+    "REQUIRES_MANUAL_REVIEW": 0.7,
 }
 
 
