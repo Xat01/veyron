@@ -15,10 +15,16 @@ Engine.
 | Local dashboard, loopback only | Web UI binds `127.0.0.1` by default; non-loopback binding requires explicit opt-in env var. CSRF + CSP + frame-ancestors DENY. |
 | Secret handling | Detected secrets are redacted in evidence, reports, and AI payloads. Never transmitted, never validated externally. |
 | Controlled DAST | Allowlist-first, budget-bound, redirect-safe, dry-run default, explicit authorisation required. Safe checks only (headers, cookies, banners). |
+| One shared network layer | Every outbound HTTP request goes through `veyron.net.client.HttpClient`: scope check → DNS resolve → destination-address validation → connect → bounded response. Individual modules cannot bypass it. |
+| `http.client`, not `urllib.request` | VEYRON must connect to a *validated IP* while still presenting the original hostname for SNI and `Host`. The high-level urllib API cannot express that, and address pinning is the DNS-rebinding defence. |
+| Stdlib-only SOCKS5 | Tor and generic SOCKS proxies need a SOCKS client; the standard library has none and a third-party dependency would break the zero-dependency promise. A minimal CONNECT-only client (RFC 1928/1929) is implemented in `veyron/net/socks5.py`. |
+| Fail-closed proxy | When a proxy is configured and unreachable, the request fails with `proxy_error`. There is no direct-retry path in the code, so "no unintended direct fallback" is a structural property, not a policy flag. |
+| Loopback bypasses the proxy | A remote proxy cannot meaningfully reach a loopback destination, and the local AI gateway must stay reachable. `network.proxy_bypass_loopback` makes this explicit and configurable. |
+| DNS resolved locally | The proxy is given an already-validated IP literal. This avoids proxy-side DNS rebinding and DNS leakage, at the cost of requiring local resolution. |
 
 ## Module map
 
-`veyron/cli.py` — CLI entrypoint (`veyron scan|doctors|scanners|history|config|ai|dashboard|dast`)
+`veyron/cli.py` — CLI entrypoint (`veyron scan|doctors|scanners|history|config|ai|proxy|dashboard|dast`)
 `veyron/config.py` — configuration (file + `VEYRON_*` env overrides, validation)
 `veyron/constants.py` — shared constants, severity/confidence/state vocabularies
 `veyron/discovery.py` — repository discovery (inventory, manifests, exclusions)
@@ -36,6 +42,11 @@ Engine.
 `veyron/subproc.py` — safe subprocess execution
 `veyron/redact.py` — secret redaction (evidence/reports/AI payloads)
 `veyron/report/core.py` — Markdown / JSON / SARIF report rendering
+`veyron/net/client.py` — shared HTTP client (scope, proxy routing, budgets, TLS)
+`veyron/net/scope.py` — scope model: host/port/path authorisation, address validation
+`veyron/net/proxy.py` — proxy configuration (HTTP/HTTPS/SOCKS5), credential masking
+`veyron/net/socks5.py` — minimal SOCKS5 CONNECT client (RFC 1928/1929)
+`veyron/net/diagnostics.py` — proxy status and route probing
 
 ## Finding validation states
 

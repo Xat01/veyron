@@ -35,10 +35,16 @@ and writes human-readable and machine-readable reports.
   (evidence required); FALSE_POSITIVE and INCONCLUSIVE states retained.
 - **Reports** — Markdown, JSON, SARIF; executive summary, scope, failures,
   exclusions, remediation guidance, known limitations; all secrets redacted.
+- **Shared network layer** — one HTTP client for every outbound request:
+  proxy routing (HTTP/HTTPS CONNECT, SOCKS5, optional Tor), scope
+  enforcement, destination-address validation, redirect validation, request
+  budgets, timeouts, cancellation and TLS verification. A proxy failure
+  never silently falls back to a direct connection.
 
 ## Technology stack
 
-- Python 3.10+ (tested on 3.14), stdlib-only networking (urllib)
+- Python 3.10+ (tested on 3.14), stdlib-only networking (`http.client` +
+  a minimal SOCKS5 client)
 - Scanners: Semgrep CE, Bandit, Gitleaks, OSV.dev API
 - AI gateway: OmniRoute (local, OpenAI-compatible) at `http://localhost:3103/v1`
 - Dashboard: stdlib `http.server` bound to 127.0.0.1, no frontend framework
@@ -60,8 +66,47 @@ optional.
 ```powershell
 veyron doctors               # check scanners + AI health
 veyron scan ./my-repo        # assess a local repo
+veyron proxy status          # proxy configuration and reachability
 veyron dashboard             # local web UI at http://127.0.0.1:8732
 ```
+
+## Proxy and network routing
+
+VEYRON routes all HTTP traffic through one shared client
+(`veyron/net/`). Configure a proxy in `~/.veyron/config.json`:
+
+```json
+{
+  "proxy": { "url": "socks5://127.0.0.1:9050", "tor": true },
+  "network": { "timeout_seconds": 15, "verify_tls": true, "max_requests": 500 }
+}
+```
+
+or with environment variables:
+
+```powershell
+$env:VEYRON_PROXY_URL = "http://user:pass@127.0.0.1:8080"   # HTTP/HTTPS proxy
+$env:VEYRON_TOR_SOCKS_PROXY = "socks5://127.0.0.1:9050"     # local Tor SOCKS
+```
+
+Diagnostics report what was actually observed:
+
+```powershell
+veyron proxy status          # configured proxy, reachability, fallback policy
+veyron proxy probe https://example.com/   # one request through the proxy
+```
+
+* A configured proxy is **fail-closed**: if the proxy is unreachable the
+  request fails with `proxy_error` — VEYRON never retries it directly.
+* Loopback destinations bypass the proxy by default; set
+  `network.proxy_bypass_loopback` to `false` to force the proxy path.
+* Tor is optional and operated by you. VEYRON verifies the SOCKS endpoint
+  is reachable and that requests use it, but **no anonymity guarantee is
+  claimed or implied**.
+* VEYRON resolves hostnames locally, validates the resolved address against
+  the scope, and connects to the validated address — this blocks
+  cloud-metadata targets and reduces DNS-rebinding risk.
+* Proxy credentials are never logged, printed, or written to reports.
 
 ## Example
 
@@ -98,7 +143,11 @@ never required for scanning.
 
 - DAST requires explicit `--authorize` + `--execute` against allowlisted
   targets only; localhost by default.
+- Every outbound request passes the shared network layer: scope check →
+  DNS resolution → destination-address validation → connect.
+- Cloud-metadata and link-local ranges are blocked by default.
 - Secrets redacted by default; never committed to fixtures or docs.
+- Proxy credentials are masked in every output surface.
 - Dashboard binds loopback only.
 
 ## Testing
@@ -107,13 +156,18 @@ never required for scanning.
 py -m pytest -q
 ```
 
-Integration tests run only when the real scanners are installed.
+Integration tests run only when the real scanners are installed. Network
+tests use locally-started servers and local proxy/SOCKS5 test doubles — no
+test contacts a third-party host.
 
 ## Known limitations
 
 - Semgrep `auto` ruleset requires metrics enabled; VEYRON pins `p/default`
   (free Semgrep registry ruleset).
 - Secret redaction is pattern-based; manual review still required.
+- The SOCKS5 client supports CONNECT only (no UDP ASSOCIATE/BIND).
+- Tor integration is optional, unverified for anonymity, and requires you
+  to install and operate Tor yourself.
 - Dashboard is single-user local; no multi-user auth.
 
 ## Roadmap

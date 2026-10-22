@@ -21,6 +21,9 @@ from .constants import (
     DEFAULT_SCANNER_TIMEOUT_SECONDS,
     ENV_PREFIX,
 )
+from .net.client import DEFAULT_USER_AGENT
+from .net.proxy import ProxyConfig, ProxyConfigError
+from .net.scope import DEFAULT_BLOCKED_CIDRS
 
 
 @dataclass
@@ -67,11 +70,30 @@ class DASTConfig:
 
 
 @dataclass
+class NetworkConfig:
+    """Shared network layer settings (proxy routing, timeouts, budgets)."""
+
+    timeout_seconds: int = 15
+    verify_tls: bool = True
+    user_agent: str = DEFAULT_USER_AGENT
+    max_requests: int = 500
+    rate_limit_per_second: float = 0.0
+    max_redirects: int = 5
+    allow_private_addresses: bool = True
+    allowed_cidrs: list[str] = field(default_factory=list)
+    blocked_cidrs: list[str] = field(default_factory=lambda: list(DEFAULT_BLOCKED_CIDRS))
+    proxy_bypass_loopback: bool = True
+
+
+@dataclass
 class Config:
     ai: AIConfig = field(default_factory=AIConfig)
     scanners: ScannerConfig = field(default_factory=ScannerConfig)
     dast: DASTConfig = field(default_factory=DASTConfig)
+    network: NetworkConfig = field(default_factory=NetworkConfig)
+    proxy: ProxyConfig = field(default_factory=ProxyConfig)
     exclusions: list[str] = field(default_factory=list)
+    load_problems: list[str] = field(default_factory=list)
     dashboard_host: str = DEFAULT_DASHBOARD_HOST
     dashboard_port: int = DEFAULT_DASHBOARD_PORT
     # Defaults resolved at instantiation (not import), so environment/config
@@ -94,7 +116,8 @@ class Config:
         if config_path.exists():
             try:
                 data = json.loads(config_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+            except (OSError, json.JSONDecodeError) as exc:
+                cfg.load_problems.append(f"cannot read config {config_path}: {exc}")
                 data = {}
             cfg._apply(data)
         cfg._apply(_env_overrides())
@@ -120,6 +143,34 @@ class Config:
                       "max_concurrency", "follow_redirects", "dry_run", "rate_limit_per_second"):
                 if k in da:
                     setattr(self.dast, k, da[k])
+        net = data.get("network")
+        if isinstance(net, dict):
+            for k in ("timeout_seconds", "verify_tls", "user_agent", "max_requests",
+                      "rate_limit_per_second", "max_redirects", "allow_private_addresses",
+                      "allowed_cidrs", "blocked_cidrs", "proxy_bypass_loopback"):
+                if k in net:
+                    setattr(self.network, k, net[k])
+        px = data.get("proxy")
+        if isinstance(px, dict):
+            url = px.get("url")
+            if url:
+                try:
+                    parsed = ProxyConfig.from_url(
+                        url,
+                        tor=bool(px.get("tor", False)),
+                        timeout_seconds=int(px.get("timeout_seconds", 15)),
+                    )
+                    parsed.enabled = bool(px.get("enabled", True))
+                    if px.get("label"):
+                        parsed.label = str(px["label"])
+                    self.proxy = parsed
+                except ProxyConfigError as exc:
+                    self.load_problems.append(f"proxy configuration is invalid: {exc}")
+            else:
+                for k in ("enabled", "scheme", "host", "port", "username", "password",
+                          "timeout_seconds", "tor", "label"):
+                    if k in px:
+                        setattr(self.proxy, k, px[k])
         for key in ("exclusions", "dashboard_host", "dashboard_port"):
             if key in data:
                 setattr(self, key, data[key])
@@ -138,6 +189,8 @@ class Config:
             "ai": asdict(self.ai),
             "scanners": asdict(self.scanners),
             "dast": asdict(self.dast),
+            "network": asdict(self.network),
+            "proxy": self.proxy.to_dict(),
             "exclusions": self.exclusions,
             "dashboard_host": self.dashboard_host,
             "dashboard_port": self.dashboard_port,
@@ -172,6 +225,19 @@ class Config:
                 problems.append("dast.max_requests must be > 0")
             if self.dast.max_concurrency < 1:
                 problems.append("dast.max_concurrency must be >= 1")
+        if not (1 <= self.network.timeout_seconds <= 600):
+            problems.append("network.timeout_seconds must be between 1 and 600")
+        if self.network.max_requests <= 0:
+            problems.append("network.max_requests must be > 0")
+        if self.network.max_redirects < 0:
+            problems.append("network.max_redirects must be >= 0")
+        if self.network.rate_limit_per_second < 0:
+            problems.append("network.rate_limit_per_second must be >= 0")
+        if self.proxy.enabled and not self.proxy.configured:
+            problems.append("proxy is enabled but incomplete (host/port/scheme missing)")
+        if self.proxy.configured and self.proxy.scheme not in ("http", "https", "socks5", "socks5h"):
+            problems.append("proxy.scheme is unsupported")
+        problems.extend(self.load_problems)
         return problems
 
     def to_display(self) -> dict[str, Any]:
@@ -180,6 +246,8 @@ class Config:
             "ai": self.ai.masked(),
             "scanners": asdict(self.scanners),
             "dast": asdict(self.dast),
+            "network": asdict(self.network),
+            "proxy": self.proxy.masked(),
             "exclusions": self.exclusions,
             "dashboard_host": self.dashboard_host,
             "dashboard_port": self.dashboard_port,
@@ -193,7 +261,7 @@ def _env_overrides() -> dict[str, Any]:
     def get(name: str, default: Any = None) -> Any:
         return os.environ.get(ENV_PREFIX + name, default)
 
-    data: dict[str, Any] = {"ai": {}, "scanners": {}, "dast": {}}
+    data: dict[str, Any] = {"ai": {}, "scanners": {}, "dast": {}, "network": {}, "proxy": {}}
     if (v := get("AI_ENABLED")) is not None:
         data["ai"]["enabled"] = v.strip().lower() in {"1", "true", "yes", "on"}
     for env_key, cfg_key, cast in [
@@ -236,5 +304,43 @@ def _env_overrides() -> dict[str, Any]:
             except ValueError:
                 pass
     if (v := get("DAST_FOLLOW_REDIRECTS")) is not None:
-        data["dast"]["follow_redirects"] = v.strip().lower() in {"1", "true", "yes"}
+        data["dast"]["follow_redirects"] = v.strip().lower() in {"1", "true", "yes", "on"}
+    # Network / proxy
+    if (v := get("NETWORK_TIMEOUT_SECONDS")) is not None:
+        try:
+            data["network"]["timeout_seconds"] = int(v)
+        except ValueError:
+            pass
+    if (v := get("NETWORK_VERIFY_TLS")) is not None:
+        data["network"]["verify_tls"] = v.strip().lower() in {"1", "true", "yes", "on"}
+    if (v := get("NETWORK_MAX_REQUESTS")) is not None:
+        try:
+            data["network"]["max_requests"] = int(v)
+        except ValueError:
+            pass
+    if (v := get("NETWORK_RATE_LIMIT_PER_SECOND")) is not None:
+        try:
+            data["network"]["rate_limit_per_second"] = float(v)
+        except ValueError:
+            pass
+    if (v := get("NETWORK_ALLOW_PRIVATE_ADDRESSES")) is not None:
+        data["network"]["allow_private_addresses"] = v.strip().lower() in {"1", "true", "yes", "on"}
+    if (v := get("PROXY_BYPASS_LOOPBACK")) is not None:
+        data["network"]["proxy_bypass_loopback"] = v.strip().lower() in {"1", "true", "yes", "on"}
+    if (v := get("PROXY_URL")) is not None:
+        data["proxy"]["url"] = v.strip()
+    if (v := get("PROXY_ENABLED")) is not None:
+        data["proxy"]["enabled"] = v.strip().lower() in {"1", "true", "yes", "on"}
+    if (v := get("PROXY_TOR")) is not None:
+        data["proxy"]["tor"] = v.strip().lower() in {"1", "true", "yes", "on"}
+    if (v := get("TOR_SOCKS_PROXY")) is not None:
+        data["proxy"]["url"] = v.strip()
+        data["proxy"]["tor"] = True
+    if (v := get("HTTP_PROXY")) is not None and "url" not in data["proxy"]:
+        data["proxy"]["url"] = v.strip()
+    if (v := get("HTTPS_PROXY")) is not None and "url" not in data["proxy"]:
+        data["proxy"]["url"] = v.strip()
+    if (v := get("ALL_PROXY")) is not None and "url" not in data["proxy"]:
+        data["proxy"]["url"] = v.strip()
+    return {k: v for k, v in data.items() if v}
     return {k: v for k, v in data.items() if v}

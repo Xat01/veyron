@@ -19,7 +19,16 @@
 - Controlled DAST: allowlist, budget, deadline, rate limit, redirect safety,
   dry-run default, audit log.
 - Local dashboard on 127.0.0.1: CSRF, CSP, path containment.
-- 123 unit tests; integration tests run when real scanners are installed.
+- Shared network layer (`veyron/net/`): one HTTP client for every outbound
+  request — scope enforcement, DNS resolution + destination-address
+  validation (cloud-metadata blocked by default), redirect validation,
+  request budgets, timeouts, cancellation, TLS verification on by default.
+- Proxy subsystem: HTTP/HTTPS CONNECT and SOCKS5 routing, optional local Tor
+  SOCKS endpoint, fail-closed behaviour (a proxy failure never silently falls
+  back to a direct connection), credential masking, `veyron proxy status` and
+  `veyron proxy probe` diagnostics.
+- 182 unit tests (127 pre-existing + 55 network-layer tests); integration
+  tests run when real scanners are installed.
 - Original SVG logo suite and brand specification.
 - PolyForm Noncommercial licence (author: Xat01); GitHub Actions workflow for CI (`tests.yml`).
 

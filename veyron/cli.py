@@ -14,6 +14,7 @@ from .ai import AIAdapter
 from .config import Config
 from .constants import APP_DISPLAY_NAME, APP_DESCRIPTION
 from .finding import prioritise
+from .net.diagnostics import probe_proxy_route, proxy_status
 from .orchestrator import Orchestrator
 from .registry import availability_report
 from .redact import redact_text
@@ -58,6 +59,13 @@ def _build_parser() -> argparse.ArgumentParser:
     dash = sub.add_parser("dashboard", help="Launch the local web dashboard", parents=[common])
     dash.add_argument("--host", default=None, help="Bind address (default 127.0.0.1)")
     dash.add_argument("--port", type=int, default=None, help="Port (default 8732)")
+
+    proxy = sub.add_parser("proxy", help="Proxy configuration and diagnostics")
+    proxy_sub = proxy.add_subparsers(dest="proxy_command", required=True)
+    proxy_sub.add_parser("status", help="Show proxy configuration and reachability", parents=[common])
+    proxy_probe = proxy_sub.add_parser("probe", help="Send a request through the configured proxy", parents=[common])
+    proxy_probe.add_argument("url", help="URL to request via the shared client")
+    proxy_probe.add_argument("--no-verify-tls", action="store_true", help="Disable TLS verification (explicit only)")
 
     dast = sub.add_parser("dast", help="Controlled dynamic testing (authorised targets only)", parents=[common])
     dast.add_argument("target_url", nargs="?", default=None,
@@ -259,6 +267,59 @@ def cmd_dast(args: argparse.Namespace, cfg: Config) -> int:
     return 0 if result.ok else 1
 
 
+def cmd_proxy(args: argparse.Namespace, cfg: Config) -> int:
+    if args.proxy_command == "status":
+        status = proxy_status(
+            cfg.proxy, proxy_bypass_loopback=cfg.network.proxy_bypass_loopback
+        )
+        if getattr(args, "json", False):
+            print(json.dumps(status, indent=2, default=str))
+        else:
+            _print(f"{APP_DISPLAY_NAME} - proxy status")
+            _print(f"  configured: {status['proxy_configured']}")
+            _print(f"  routing: {status['routing']}")
+            _print(f"  configured_proxy: {status['configured_proxy'].get('endpoint') or '(none)'}")
+            _print(f"  has_credentials: {status['configured_proxy'].get('has_credentials')}")
+            _print(f"  tor_mode: {status['tor_mode']}")
+            _print(f"  reachable: {status['reachable']}")
+            if status.get("reachability_error"):
+                _print(f"  reachability_error: {status['reachability_error']}")
+            _print(f"  direct_fallback_possible: {status['direct_fallback_possible']}")
+            _print(f"  loopback_bypasses_proxy: {status['loopback_bypasses_proxy']}")
+            for note in status.get("limitations", []):
+                _print(f"  - {note}")
+        return 0
+
+    if args.proxy_command == "probe":
+        if not cfg.proxy.configured:
+            print("error: no proxy configured (set proxy.url or VEYRON_PROXY_URL)", file=sys.stderr)
+            return 2
+        result = probe_proxy_route(
+            cfg.proxy,
+            args.url,
+            timeout=cfg.network.timeout_seconds,
+            verify_tls=not args.no_verify_tls,
+            proxy_bypass_loopback=cfg.network.proxy_bypass_loopback,
+        )
+        if getattr(args, "json", False):
+            print(json.dumps(result, indent=2, default=str))
+        else:
+            _print(f"{APP_DISPLAY_NAME} - proxy probe")
+            _print(f"  url: {result['url']}")
+            _print(f"  ok: {result['ok']}")
+            _print(f"  status: {result['status']}")
+            _print(f"  via_proxy: {result['via_proxy']}")
+            _print(f"  direct_fallback_possible: {result['direct_fallback_possible']}")
+            if result.get("error"):
+                _print(f"  error: {result['error']} ({result.get('error_kind')})")
+            _print(f"  stats: {result['stats']}")
+        return 0 if result.get("ok") else 1
+
+    parser = _build_parser()
+    parser.parse_args(["proxy", "--help"])
+    return 2
+
+
 def cmd_dashboard(args: argparse.Namespace, cfg: Config) -> int:
     from .dashboard import serve
 
@@ -279,6 +340,7 @@ def main(argv: list[str] | None = None) -> int:
         "history": cmd_history,
         "config": cmd_config,
         "ai": cmd_ai,
+        "proxy": cmd_proxy,
         "dashboard": cmd_dashboard,
         "dast": cmd_dast,
     }
