@@ -33,6 +33,20 @@ and writes human-readable and machine-readable reports.
   checks with explicit authorisation; dry-run by default. An opt-in
   `safe-active` profile adds a bounded same-origin crawl and passive
   HTML/form analysis — no exploitation, fuzzing, or form submission.
+  Profile-gated modular web checks (XSS, SQL-injection error differential,
+  SSTI arithmetic, SSRF via operator callback, and operator-declared broken
+  access control) validate only what they actually observed, and say so.
+- **Four assessment profiles** — `PASSIVE`, `SAFE_ACTIVE`,
+  `CONTROLLED_VALIDATION`, and `LAB_EXPLOIT`. Each declares what evidence it
+  may collect; higher profiles require explicit authorisation (`LAB_EXPLOIT`
+  additionally requires a declared isolated lab environment).
+- **Scan presets** — `veyron scan --profile quick|standard|deep` trades
+  scanner coverage for speed (`deep` is the only preset that may use AI).
+- **Professional reporting** — consolidated markdown/JSON/SARIF/HTML reports,
+  per-finding reports, and an editable responsible-disclosure draft. Every
+  finding carries validation evidence, expected vs observed behaviour,
+  impact, prerequisites, safe reproduction, remediation and verification
+  guidance.
 - **Finding lifecycle** — DETECTED → ANALYSED → CORROBORATED → VALIDATED
   (evidence required); FALSE_POSITIVE and INCONCLUSIVE states retained.
 - **Reports** — Markdown, JSON, SARIF; executive summary, scope, failures,
@@ -67,9 +81,25 @@ optional.
 
 ```powershell
 veyron doctors               # check scanners + AI health
-veyron scan ./my-repo        # assess a local repo
+veyron scan ./my-repo                 # assess a local repo (standard preset)
+veyron scan ./my-repo --profile quick  # fast secrets + dependency scan
+veyron scan ./my-repo --profile deep   # all scanners + AI enrichment
 veyron proxy status          # proxy configuration and reachability
 veyron dashboard             # local web UI at http://127.0.0.1:8732
+```
+
+Website assessments (authorised targets only):
+
+```powershell
+# Dry run first: shows the plan, sends nothing.
+veyron dast http://127.0.0.1:8080/
+
+# Execute passive/safe-active checks against an allowlisted target.
+veyron dast http://127.0.0.1:8080/ --execute --authorize --profile safe-active
+
+# Controlled validation, restricted to a path prefix, with reports on disk.
+veyron dast http://127.0.0.1:8080/ --profile controlled-validation `
+  --execute --authorize --permit-path /app --report-dir .\reports\dast
 ```
 
 ## Proxy and network routing
@@ -145,6 +175,12 @@ never required for scanning.
 
 - DAST requires explicit `--authorize` + `--execute` against allowlisted
   targets only; localhost by default.
+- Validation never runs without authorisation: profiles that require
+  `--authorize`/`--execute` are refused rather than silently downgraded, and
+  a global `stop_file` aborts a run immediately when it appears.
+- VEYRON never contacts a third party on your behalf: no security-contact
+  lookup, no ticket creation, no outbound disclosure. It only produces an
+  editable draft you review and send yourself.
 - The `safe-active` website profile crawls only same-origin links and issues
   only `GET`/`OPTIONS`; it never submits forms or injects payloads.
 - `veyron dast <url> -y` scopes the exact URL typed for that run and executes

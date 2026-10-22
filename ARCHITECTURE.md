@@ -14,7 +14,7 @@ Engine.
 | OpenAI-compatible local gateway | OmniRoute at `http://localhost:3103/v1` routes requests to verified free models only; never to paid models. Configuration stored locally, key masked in output. |
 | Local dashboard, loopback only | Web UI binds `127.0.0.1` by default; non-loopback binding requires explicit opt-in env var. CSRF + CSP + frame-ancestors DENY. |
 | Secret handling | Detected secrets are redacted in evidence, reports, and AI payloads. Never transmitted, never validated externally. |
-| Controlled DAST | Allowlist-first, budget-bound, redirect-safe, dry-run default, explicit authorisation required. Safe checks only (headers, cookies, banners). The opt-in `safe-active` profile adds a bounded same-origin crawl plus passive HTML/form/mixed-content analysis; still `GET`/`OPTIONS` only, no form submission, no payloads. |
+| Controlled DAST | Allowlist-first, budget-bound, redirect-safe, dry-run default, explicit authorisation required. Safe checks only (headers, cookies, banners). The opt-in `safe-active` profile adds a bounded same-origin crawl plus passive HTML/form/mixed-content analysis; still `GET`/`OPTIONS` only, no form submission, no payloads. Higher profiles (`controlled-validation`, `lab-exploit`) permit modular class-specific checks whose findings must satisfy the validation engine's evidence requirements before being marked `VALIDATED`. |
 | One shared network layer | Every outbound HTTP request goes through `veyron.net.client.HttpClient`: scope check → DNS resolve → destination-address validation → connect → bounded response. Individual modules cannot bypass it. Enforced by a repository-wide test. |
 | Two kinds of destination | A *website assessment target* (DAST) is bound by the operator's allowlist (`Scope`). A *configured integration endpoint* (AI gateway, OSV advisory API) is authorised by its configuration, not by a host allowlist — applying a website allowlist to it would reject a perfectly valid provider. Both get proxy routing, fail-closed proxy behaviour, budgets, timeouts and TLS verification. |
 | `http.client`, not `urllib.request` | VEYRON must connect to a *validated IP* while still presenting the original hostname for SNI and `Host`. The high-level urllib API cannot express that, and address pinning is the DNS-rebinding defence. |
@@ -42,7 +42,10 @@ Engine.
 `veyron/adapters/osv.py` — OSV.dev SCA adapter (live or offline cache)
 `veyron/subproc.py` — safe subprocess execution
 `veyron/redact.py` — secret redaction (evidence/reports/AI payloads)
-`veyron/report/core.py` — Markdown / JSON / SARIF report rendering
+`veyron/report/core.py` — Markdown / JSON / SARIF / HTML report rendering, per-finding reports, disclosure draft
+`veyron/assessment.py` — assessment profiles and the `AssessmentSpec` authorisation model
+`veyron/validation.py` — evidence-driven validation engine (per-class requirements, deterministic verdicts)
+`veyron/checks/` — modular, profile-gated web checks (xss, sqli, ssti, path_traversal, ssrf, access_control) + loopback callback listener
 `veyron/net/client.py` — shared HTTP client (scope, proxy routing, budgets, TLS)
 `veyron/net/scope.py` — scope model: host/port/path authorisation, address validation
 `veyron/net/proxy.py` — proxy configuration (HTTP/HTTPS/SOCKS5), credential masking
