@@ -76,6 +76,9 @@ def _build_parser() -> argparse.ArgumentParser:
                       help="Actually execute safe checks against the authorised target")
     dast.add_argument("--authorize", action="store_true",
                       help="Confirm you are authorised to test the target")
+    dast.add_argument("--profile", choices=("passive", "safe-active"), default=None,
+                      help="Assessment profile: passive (default) or safe-active "
+                           "(same-origin crawl + read-only HTML/form analysis)")
     return p
 
 
@@ -256,6 +259,7 @@ def cmd_dast(args: argparse.Namespace, cfg: Config) -> int:
         target_url=args.target_url,
         execute=execute,
         authorized=bool(args.authorize),
+        profile=getattr(args, "profile", None),
     )
     # DASTResult is a dataclass: serialise with asdict() and read fields
     # via attribute access (there is no .get()).

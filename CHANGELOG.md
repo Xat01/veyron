@@ -18,6 +18,10 @@
   redaction, untrusted model output treated as text only.
 - Controlled DAST: allowlist, budget, deadline, rate limit, redirect safety,
   dry-run default, audit log.
+- Website assessment (`dast --profile safe-active`): bounded same-origin
+  crawl (default 10 pages), passive HTML link/form/mixed-content analysis,
+  `security.txt` and `OPTIONS` probes, new DETECTED-only findings. No
+  exploitation, fuzzing, or form submission.
 - Local dashboard on 127.0.0.1: CSRF, CSP, path containment.
 - Shared network layer (`veyron/net/`): one HTTP client for every outbound
   request — scope enforcement, DNS resolution + destination-address

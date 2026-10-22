@@ -67,6 +67,11 @@ class DASTConfig:
     follow_redirects: bool = False
     dry_run: bool = True
     rate_limit_per_second: float = 2.0
+    # "passive" inspects the single target page. "safe-active" adds a
+    # same-origin crawl plus read-only HTML/forms/asset analysis. Neither
+    # profile exploits, fuzzes, or submits forms.
+    profile: str = "passive"
+    max_pages: int = 10
     # Transport settings forwarded to the shared HTTP client.
     timeout_seconds: int = 15
     max_redirects: int = 5
@@ -144,7 +149,7 @@ class Config:
         if isinstance(da, dict):
             for k in ("enabled", "allowlist", "max_requests", "max_minutes",
                       "max_concurrency", "follow_redirects", "dry_run", "rate_limit_per_second",
-                      "timeout_seconds", "max_redirects"):
+                      "profile", "max_pages", "timeout_seconds", "max_redirects"):
                 if k in da:
                     setattr(self.dast, k, da[k])
         net = data.get("network")
@@ -233,6 +238,10 @@ class Config:
                 problems.append("dast.timeout_seconds must be between 1 and 600")
             if self.dast.max_redirects < 0:
                 problems.append("dast.max_redirects must be >= 0")
+            if self.dast.profile not in {"passive", "safe-active"}:
+                problems.append("dast.profile must be 'passive' or 'safe-active'")
+            if self.dast.max_pages < 1:
+                problems.append("dast.max_pages must be >= 1")
         if not (1 <= self.network.timeout_seconds <= 600):
             problems.append("network.timeout_seconds must be between 1 and 600")
         if self.network.max_requests <= 0:
@@ -305,12 +314,15 @@ def _env_overrides() -> dict[str, Any]:
         ("DAST_MAX_REQUESTS", "max_requests", int),
         ("DAST_MAX_MINUTES", "max_minutes", int),
         ("DAST_MAX_CONCURRENCY", "max_concurrency", int),
+        ("DAST_MAX_PAGES", "max_pages", int),
     ]:
         if (v := get(env_key)) is not None:
             try:
                 data["dast"][cfg_key] = cast(v)
             except ValueError:
                 pass
+    if (v := get("DAST_PROFILE")) is not None:
+        data["dast"]["profile"] = v.strip().lower()
     if (v := get("DAST_FOLLOW_REDIRECTS")) is not None:
         data["dast"]["follow_redirects"] = v.strip().lower() in {"1", "true", "yes", "on"}
     # Network / proxy

@@ -69,6 +69,36 @@ def test_dast_transport_fields_are_validated(tmp_path):
     assert any("dast.timeout_seconds" in p for p in problems)
 
 
+def test_dast_website_profile_fields_are_loadable(tmp_path):
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({
+        "dast": {"enabled": True, "allowlist": ["127.0.0.1:8080"],
+                 "profile": "safe-active", "max_pages": 25},
+    }), encoding="utf-8")
+    cfg = Config.load(p)
+    assert cfg.dast.profile == "safe-active"
+    assert cfg.dast.max_pages == 25
+    assert cfg.validate() == []
+
+
+def test_dast_website_profile_is_validated():
+    cfg = Config()
+    cfg.dast.enabled = True
+    cfg.dast.profile = "aggressive"
+    cfg.dast.max_pages = 0
+    problems = cfg.validate()
+    assert any("dast.profile" in p for p in problems)
+    assert any("dast.max_pages" in p for p in problems)
+
+
+def test_env_overrides_website_profile(monkeypatch):
+    monkeypatch.setenv("VEYRON_DAST_PROFILE", "safe-active")
+    monkeypatch.setenv("VEYRON_DAST_MAX_PAGES", "7")
+    cfg = Config.load(None)
+    assert cfg.dast.profile == "safe-active"
+    assert cfg.dast.max_pages == 7
+
+
 def test_env_overrides(monkeypatch):
     monkeypatch.setenv("VEYRON_AI_ENABLED", "false")
     monkeypatch.setenv("VEYRON_AI_MODEL", "env-model")

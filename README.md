@@ -30,7 +30,9 @@ and writes human-readable and machine-readable reports.
   free models only; AI output is advisory, never executable, never permitted
   to bypass safety checks.
 - **Controlled dynamic testing** — allowlist-first, budget-bound, redirect-safe
-  checks with explicit authorisation; dry-run by default.
+  checks with explicit authorisation; dry-run by default. An opt-in
+  `safe-active` profile adds a bounded same-origin crawl and passive
+  HTML/form analysis — no exploitation, fuzzing, or form submission.
 - **Finding lifecycle** — DETECTED → ANALYSED → CORROBORATED → VALIDATED
   (evidence required); FALSE_POSITIVE and INCONCLUSIVE states retained.
 - **Reports** — Markdown, JSON, SARIF; executive summary, scope, failures,
@@ -143,6 +145,8 @@ never required for scanning.
 
 - DAST requires explicit `--authorize` + `--execute` against allowlisted
   targets only; localhost by default.
+- The `safe-active` website profile crawls only same-origin links and issues
+  only `GET`/`OPTIONS`; it never submits forms or injects payloads.
 - Every outbound request passes the shared network layer: scope check →
   DNS resolution → destination-address validation → connect.
 - Cloud-metadata and link-local ranges are blocked by default.

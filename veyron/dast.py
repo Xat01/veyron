@@ -24,7 +24,9 @@ request, so scope escapes are detectable.
 from __future__ import annotations
 
 import json
+import re
 import time
+from html.parser import HTMLParser
 from typing import Any
 
 from dataclasses import dataclass, field, asdict
@@ -32,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-from .net.client import HttpClient, HttpResponse, SENSITIVE_KEYS
+from .net.client import HttpClient, HttpResponse, SENSITIVE_KEYS, redact_url
 from .net.scope import Scope
 
 from .config import DASTConfig
@@ -50,6 +52,22 @@ SECURITY_HEADERS = [
 
 # Headers never sent anywhere in DAST mode.
 DISABLED_HEADERS = {"authorization", "cookie"}
+
+# Standard disclosure endpoint checked by the safe-active profile.
+SECURITY_TXT_PATH = "/.well-known/security.txt"
+
+# Read-only fingerprint patterns for accidental information disclosure in
+# response bodies. These match *diagnostic text*, never user content.
+DISCLOSURE_PATTERNS: list[tuple[str, str]] = [
+    (r"(?i)traceback \(most recent call last\)", "Python traceback"),
+    (r"(?i)fatal error:", "PHP fatal error"),
+    (r"(?i)you have an error in your sql syntax", "SQL syntax error"),
+    (r"(?i)warning:\s*mysql", "MySQL warning"),
+    (r"(?i)\bORA-\d{5}\b", "Oracle error code"),
+    (r"(?i)stack trace:", "stack trace"),
+    (r"(?i)\bdebug\s*=\s*true\b", "debug flag enabled"),
+    (r"(?i)at\s+[\w.$]+\([\w.]+\.java:\d+\)", "Java stack frame"),
+]
 
 
 @dataclass
@@ -71,6 +89,7 @@ class DASTResult:
     mode: str
     target: str
     authorized_ok: bool
+    profile: str = "passive"
     plan: list[dict[str, Any]] = field(default_factory=list)
     checks: list[dict[str, Any]] = field(default_factory=list)
     findings: list[dict[str, Any]] = field(default_factory=list)
@@ -190,6 +209,158 @@ def _redact_location(loc: str) -> str:
     return base + "?" + "&".join(pairs)
 
 
+def _origin(url: str) -> tuple[str, str, int]:
+    """Return (scheme, host, port) with scheme-default ports normalised."""
+    parsed = urlparse(url)
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return parsed.scheme.lower(), (parsed.hostname or "").lower(), port
+
+
+class _PageParser(HTMLParser):
+    """Extract links, subresources, and forms from an HTML page.
+
+    Parsing is strictly passive: nothing here fetches a resource, executes
+    script, or submits a form.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.links: list[str] = []
+        self.resources: list[str] = []
+        self.forms: list[dict[str, Any]] = []
+        self.title = ""
+        self._current_form: dict[str, Any] | None = None
+        self._in_title = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        a = {k.lower(): (v or "") for k, v in attrs}
+        if tag in {"a", "area"} and a.get("href"):
+            self.links.append(a["href"])
+        if tag == "title":
+            self._in_title = True
+        if tag in {"script", "img", "iframe", "frame", "source", "video",
+                   "audio", "embed", "object", "link"}:
+            for key in ("src", "href", "data"):
+                if a.get(key):
+                    self.resources.append(a[key])
+        if tag == "form":
+            self._current_form = {
+                "action": a.get("action", ""),
+                "method": (a.get("method") or "get").lower(),
+                "has_credential_field": False,
+                "fields": [],
+            }
+            self.forms.append(self._current_form)
+        elif self._current_form is not None and tag in {"input", "select", "textarea", "button"}:
+            name = a.get("name", "")
+            ftype = (a.get("type") or tag).lower()
+            if name:
+                self._current_form["fields"].append({"name": name, "type": ftype})
+            if ftype == "password":
+                self._current_form["has_credential_field"] = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "title":
+            self._in_title = False
+        elif tag == "form":
+            self._current_form = None
+
+    def handle_data(self, data: str) -> None:
+        if self._in_title and len(self.title) < 300:
+            self.title += data
+
+
+def _looks_like_html(headers: dict[str, str], body: bytes) -> bool:
+    content_type = headers.get("content-type", "").lower()
+    if "html" in content_type:
+        return True
+    head = body[:512].lstrip().lower()
+    return head.startswith(b"<!doctype html") or head.startswith(b"<html")
+
+
+def _analyse_page(page_url: str, body: bytes, headers: dict[str, str], root_url: str) -> dict[str, Any]:
+    """Passive HTML analysis for one in-scope page."""
+    analysis: dict[str, Any] = {
+        "title": "",
+        "links": [],
+        "forms": [],
+        "mixed_content": [],
+        "external_resources": [],
+        "disclosure": [],
+        "plaintext_login_form": False,
+        "cross_origin_form_actions": [],
+    }
+    if not _looks_like_html(headers, body):
+        return analysis
+
+    parser = _PageParser()
+    try:
+        parser.feed(body.decode("utf-8", "replace"))
+    except Exception as exc:  # defensive: malformed markup must not abort a run
+        analysis["parse_error"] = type(exc).__name__
+    analysis["title"] = " ".join(parser.title.split())[:200]
+
+    root_origin = _origin(root_url)
+    page_origin = _origin(page_url)
+    https_page = page_url.startswith("https://")
+
+    seen_links: set[str] = set()
+    for raw in parser.links:
+        absolute = urljoin(page_url, raw.strip()).split("#", 1)[0]
+        if not absolute.startswith(("http://", "https://")):
+            continue
+        embedded = urlparse(absolute)
+        if embedded.username or embedded.password:
+            # Never send or record URL-embedded credentials, even if a page
+            # author put them there.
+            continue
+        if _origin(absolute) != root_origin:
+            # Off-target links are evidence of external coupling, never crawl
+            # targets. Record the host only, never the full query string.
+            host = urlparse(absolute).hostname or ""
+            if host and host not in analysis["external_resources"]:
+                analysis["external_resources"].append(host)
+            continue
+        if absolute not in seen_links:
+            seen_links.add(absolute)
+            analysis["links"].append(absolute)
+
+    for resource in parser.resources:
+        absolute = urljoin(page_url, resource.strip())
+        if https_page and absolute.startswith("http://"):
+            redacted = redact_url(absolute)
+            if redacted not in analysis["mixed_content"]:
+                analysis["mixed_content"].append(redacted)
+        elif _origin(absolute) != root_origin:
+            host = urlparse(absolute).hostname or ""
+            if host and host not in analysis["external_resources"]:
+                analysis["external_resources"].append(host)
+
+    for form in parser.forms:
+        action = urljoin(page_url, form["action"] or page_url)
+        cross_origin = _origin(action) != root_origin
+        record = {
+            "action": redact_url(action),
+            "method": form["method"],
+            "has_credential_field": form["has_credential_field"],
+            "field_count": len(form["fields"]),
+            "cross_origin": cross_origin,
+        }
+        analysis["forms"].append(record)
+        if cross_origin:
+            analysis["cross_origin_form_actions"].append(redact_url(action))
+        if form["has_credential_field"] and page_origin[0] == "http" and not action.startswith("https://"):
+            analysis["plaintext_login_form"] = True
+
+    text = body.decode("utf-8", "replace")
+    for pattern, label in DISCLOSURE_PATTERNS:
+        if re.search(pattern, text):
+            if label not in analysis["disclosure"]:
+                analysis["disclosure"].append(label)
+
+    return analysis
+
+
 def _scope_for_allowlist(cfg: DASTConfig) -> Scope:
     """Build a Scope from the DAST allowlist entries.
 
@@ -202,7 +373,8 @@ def _scope_for_allowlist(cfg: DASTConfig) -> Scope:
     return Scope.from_allowlist([entry for entry in cfg.allowlist if entry.strip()])
 
 
-def _safe_request(url: str, cfg: DASTConfig, budget: Budget, audit: list[AuditRecord]) -> tuple[int | None, dict[str, str], bytes, str | None]:
+def _safe_request(url: str, cfg: DASTConfig, budget: Budget, audit: list[AuditRecord],
+                  *, method: str = "GET") -> tuple[int | None, dict[str, str], bytes, str | None]:
     """GET a URL via the shared HttpClient, preserving the same return shape.
 
     Scope, proxy routing with fail-closed behaviour, redirect validation,
@@ -240,7 +412,7 @@ def _safe_request(url: str, cfg: DASTConfig, budget: Budget, audit: list[AuditRe
         max_redirects=cfg.max_redirects,
         user_agent=USER_AGENT,
     )
-    response: HttpResponse = client.get(url, allow_redirects=False)
+    response: HttpResponse = client.request(method, url, allow_redirects=False)
 
     status = response.status if response.ok else None
     # Raw headers are returned (matching the previous contract) but every
@@ -258,9 +430,12 @@ def _safe_request(url: str, cfg: DASTConfig, budget: Budget, audit: list[AuditRe
     return status, headers, response.body, error
 
 
-def run_dast(cfg: DASTConfig, *, target_url: str, execute: bool, authorized: bool) -> DASTResult:
+def run_dast(cfg: DASTConfig, *, target_url: str, execute: bool, authorized: bool,
+             profile: str | None = None) -> DASTResult:
     """Run (or plan) controlled dynamic checks against an authorised target."""
 
+    if profile in {"passive", "safe-active"}:
+        cfg.profile = profile
     # Execution requires all three: explicit --execute, explicit --authorize,
     # and dry_run disabled in config is NOT required — the CLI flags are the
     # explicit consent signal, and scope is still enforced by the allowlist.
@@ -284,6 +459,7 @@ def run_dast(cfg: DASTConfig, *, target_url: str, execute: bool, authorized: boo
         mode=mode,
         target=target_url,
         authorized_ok=authorized_ok,
+        profile=cfg.profile,
         budget=budget.snapshot(),
     )
 
@@ -318,53 +494,129 @@ def run_dast(cfg: DASTConfig, *, target_url: str, execute: bool, authorized: boo
 
 
 def _build_plan(target_url: str, cfg: DASTConfig) -> list[dict[str, Any]]:
-    base = ["/", "/robots.txt", "/sitemap.xml"]
-    return [
+    root = target_url.rstrip("/")
+    fixed = [
+        ("/", "GET", "security header and cookie inspection"),
+        ("/robots.txt", "GET", "disclosed path inventory (read-only)"),
+        ("/sitemap.xml", "GET", "sitemap presence (read-only)"),
+    ]
+    if cfg.profile == "safe-active":
+        fixed.append((SECURITY_TXT_PATH, "GET", "security disclosure policy presence"))
+        fixed.append(("/", "OPTIONS", "advertised HTTP methods (read-only)"))
+    plan = [
         {
             "step": i + 1,
-            "method": "GET",
-            "url": target_url.rstrip("/") + path,
+            "method": method,
+            "url": root + path,
             "purpose": purpose,
             "destructive": False,
             "scope_checked": "host must match allowlist",
         }
-        for i, (path, purpose) in enumerate(zip(base, [
-            "security header and cookie inspection",
-            "disclosed path inventory (read-only)",
-            "sitemap presence (read-only)",
-        ]))
+        for i, (path, method, purpose) in enumerate(fixed)
     ]
+    if cfg.profile == "safe-active":
+        plan.append({
+            "step": len(plan) + 1,
+            "method": "GET",
+            "url": root + "/{same-origin link}",
+            "purpose": f"crawl discovered same-origin pages (max {cfg.max_pages})",
+            "destructive": False,
+            "scope_checked": "host must match allowlist",
+            "crawl": True,
+        })
+    return plan
 
 
-def _run_safe_checks(cfg: DASTConfig, target_url: str, budget: Budget, audit: list[AuditRecord]) -> list[dict[str, Any]]:
+def _canonical(url: str) -> str:
+    parsed = urlparse(url)
+    path = parsed.path or "/"
+    query = f"?{parsed.query}" if parsed.query else ""
+    return f"{parsed.scheme}://{parsed.netloc.lower()}{path}{query}"
+
+
+def _make_check(url: str, method: str, status: int | None, headers: dict[str, str],
+                body: bytes, err: str | None, cfg: DASTConfig, root_url: str) -> dict[str, Any]:
+    check: dict[str, Any] = {
+        "url": url,
+        "method": method,
+        "status": status,
+        "security_headers_present": [h for h in SECURITY_HEADERS if h in headers],
+        "security_headers_missing": [h for h in SECURITY_HEADERS if h not in headers],
+        # Cookie values are session credentials: only the name and the
+        # security-relevant attributes are recorded.
+        "cookies": _cookie_summary(headers.get("set-cookie") or ""),
+        "server": headers.get("server"),
+        "error": err,
+        "redirect_location": _redact_location(headers.get("location") or ""),
+    }
+    if method == "OPTIONS":
+        check["allowed_methods"] = headers.get("allow")
+    elif method == "GET" and status is not None:
+        check.update(_analyse_page(url, body, headers, root_url))
+    if status in (301, 302, 303, 307, 308):
+        loc = headers.get("location") or ""
+        check["redirect_blocked_as_out_of_scope"] = not host_in_allowlist(
+            urljoin(url, loc), cfg.allowlist
+        )
+    return check
+
+
+def _run_safe_checks(cfg: DASTConfig, target_url: str, budget: Budget,
+                     audit: list[AuditRecord]) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     delay = 1.0 / max(cfg.rate_limit_per_second, 0.1)
+    seen: set[str] = set()
+    queue: list[str] = []
+    safe_active = cfg.profile == "safe-active"
+    # The root page is always fetched; count it against the crawl cap.
+    pages_fetched = 1 if safe_active else 0
+    root_url = target_url.rstrip("/") + "/"
+
     for plan_step in _build_plan(target_url, cfg):
+        if plan_step.get("crawl"):
+            continue
         if budget.exhausted_reason:
             break
         url = plan_step["url"]
-        status, headers, body, err = _safe_request(url, cfg, budget, audit)
-        check = {
-            "url": url,
-            "status": status,
-            "security_headers_present": [h for h in SECURITY_HEADERS if h in headers],
-            "security_headers_missing": [h for h in SECURITY_HEADERS if h not in headers],
-            # Cookie values are session credentials: only the name and the
-            # security-relevant attributes are recorded.
-            "cookies": _cookie_summary(headers.get("set-cookie") or ""),
-            "server": headers.get("server"),
-            "error": err,
-            "redirect_location": _redact_location(headers.get("location") or ""),
-        }
-        if status in (301, 302, 303, 307, 308):
-            loc = headers.get("location") or ""
-            in_scope = host_in_allowlist(urljoin(url, loc), cfg.allowlist)
-            check["redirect_blocked_as_out_of_scope"] = not in_scope
-            if not in_scope:
-                audit.append(AuditRecord(AuditRecord.now(), loc, "REDIRECT_BLOCKED", False,
-                                         "redirect target outside allowlist; not followed"))
+        method = plan_step["method"]
+        status, headers, body, err = _safe_request(url, cfg, budget, audit, method=method)
+        check = _make_check(url, method, status, headers, body, err, cfg, root_url)
+        if check.get("redirect_blocked_as_out_of_scope"):
+            audit.append(AuditRecord(AuditRecord.now(), headers.get("location") or "",
+                                     "REDIRECT_BLOCKED", False,
+                                     "redirect target outside allowlist; not followed"))
         checks.append(check)
-        time.sleep(delay)  # rate limit
+        seen.add(_canonical(url))
+        if safe_active and method == "GET":
+            queue.extend(link for link in check.get("links", [])
+                         if _canonical(link) not in seen)
+        if delay:
+            time.sleep(delay)  # rate limit
+
+    if safe_active:
+        while queue and not budget.exhausted_reason:
+            if pages_fetched >= cfg.max_pages:
+                audit.append(AuditRecord(AuditRecord.now(), target_url, "CRAWL_CAP", True,
+                                         f"crawl limited to {cfg.max_pages} pages"))
+                break
+            url = queue.pop(0)
+            key = _canonical(url)
+            if key in seen:
+                continue
+            seen.add(key)
+            if not host_in_allowlist(url, cfg.allowlist):
+                audit.append(AuditRecord(AuditRecord.now(), url, "BLOCKED_OUT_OF_SCOPE", False,
+                                         "discovered link outside allowlist"))
+                continue
+            status, headers, body, err = _safe_request(url, cfg, budget, audit)
+            check = _make_check(url, "GET", status, headers, body, err, cfg, root_url)
+            checks.append(check)
+            pages_fetched += 1
+            queue.extend(link for link in check.get("links", [])
+                         if _canonical(link) not in seen)
+            if delay:
+                time.sleep(delay)
+
     return checks
 
 
@@ -401,6 +653,64 @@ def _interpret(checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "evidence": f"SET-COOKIE observed on {c['url']}",
                     "remediation": "Set HttpOnly and Secure (and SameSite) on session cookies.",
                 })
+
+    # -- website-assessment observations (safe-active profile) -----------------
+    mixed = [c["url"] for c in checks if c.get("mixed_content")]
+    if mixed:
+        findings.append({
+            "title": "HTTPS page loads plaintext HTTP resources",
+            "detail": f"{len(mixed)} page(s) reference http:// subresources",
+            "severity": "medium",
+            "confidence": "high",
+            "validation_status": "DETECTED",
+            "evidence": "mixed content on: " + ", ".join(mixed[:10]),
+            "remediation": "Serve every subresource over HTTPS and add a CSP upgrade-insecure-requests rule.",
+        })
+
+    plaintext_passwords = [c["url"] for c in checks if c.get("plaintext_login_form")]
+    if plaintext_passwords:
+        findings.append({
+            "title": "Password form submitted over plaintext HTTP",
+            "detail": "A password field is served and posted without TLS",
+            "severity": "high",
+            "confidence": "high",
+            "validation_status": "DETECTED",
+            "evidence": "password form on: " + ", ".join(plaintext_passwords[:10]),
+            "remediation": "Serve the form and its action over HTTPS and redirect HTTP to HTTPS.",
+        })
+
+    cross_origin = [
+        (c["url"], action)
+        for c in checks
+        for action in c.get("cross_origin_form_actions", [])
+    ]
+    if cross_origin:
+        findings.append({
+            "title": "Form posts to a different origin",
+            "detail": f"{len(cross_origin)} form action(s) leave the assessed origin",
+            "severity": "medium",
+            "confidence": "medium",
+            "validation_status": "DETECTED",
+            "evidence": "; ".join(f"{page} -> {action}" for page, action in cross_origin[:5]),
+            "remediation": "Confirm the destination is trusted; otherwise post to a same-origin handler.",
+        })
+
+    disclosed = [
+        (c["url"], label)
+        for c in checks
+        for label in c.get("disclosure", [])
+    ]
+    if disclosed:
+        findings.append({
+            "title": "Diagnostic information disclosed in response body",
+            "detail": ", ".join(sorted({label for _, label in disclosed})),
+            "severity": "low",
+            "confidence": "medium",
+            "validation_status": "DETECTED",
+            "evidence": "; ".join(f"{page}: {label}" for page, label in disclosed[:5]),
+            "remediation": "Disable debug output and return generic error pages in production.",
+        })
+
     return findings
 
 
