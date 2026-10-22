@@ -6,18 +6,23 @@ Rules enforced here:
 - All outbound payloads pass through secret redaction.
 - Model output is treated as untrusted data: parsed defensively, never
   executed, never allowed to bypass deterministic controls.
+
+Transport uses the shared `HttpClient` (`veyron.net.client`), so the
+provider call gets proxy routing, fail-closed proxy behaviour, request
+budgets, timeouts and TLS verification. The provider is a *configured
+integration endpoint*, not a website assessment target, so the website
+allowlist is deliberately not applied to it.
 """
 
 from __future__ import annotations
 
 import json
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
 from .config import AIConfig
+from .net.client import HttpClient, HttpResponse
 from .redact import redact_text
 
 
@@ -35,6 +40,30 @@ class AIResult:
 
 # Failure kinds that are safe to retry (bounded by config.max_retries).
 RETRYABLE = {"unreachable", "rate_limit", "http_error"}
+
+# Transport-level failures reported by the shared HTTP client. The original
+# urllib implementation reported every one of these as "unreachable", and
+# the retry policy depends on that: they are transient by nature. The
+# shared client uses finer-grained kinds internally, so they are mapped
+# back onto the documented AI failure-kind set here.
+_TRANSPORT_FAILURE_KINDS = frozenset({
+    "connection_error",
+    "timeout",
+    "dns_error",
+    "proxy_error",
+    "redirect_blocked",
+    "too_many_redirects",
+    "unsupported_scheme",
+    "invalid_url",
+    "address_blocked",
+    "cancelled",
+    "deadline_exceeded",
+})
+
+
+def _status_to_failure_kind(status: int) -> str:
+    """Classify a provider HTTP status into an AI failure kind."""
+    return {401: "auth", 403: "auth", 429: "rate_limit"}.get(status, "http_error")
 
 
 class AIError(Exception):
@@ -71,7 +100,7 @@ class AIAdapter:
         """Cheap liveness probe with minimal token use."""
         if not self.cfg.enabled:
             return AIResult(ok=False, failure_kind="disabled", error="AI assistance disabled by configuration")
-        return self.chat("Reply with exactly: OK", max_tokens=8, system_override="Reply with exactly OK. No other text.")
+        return self.chat("Reply with exactly: OK", max_tokens=8, system="Reply with exactly OK. No other text.")
 
     def chat(
         self,
@@ -123,33 +152,75 @@ class AIAdapter:
         last_error.retries = attempts_made - 1 if attempts_made else 0
         return last_error
 
-    def _post(self, body: dict[str, Any]) -> AIResult:
-        url = self.cfg.base_url.rstrip("/") + "/chat/completions"
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(body).encode("utf-8"),
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.cfg.api_key}",
-                "User-Agent": "veyron/0.1",
-            },
-        )
+    def _build_client(self) -> HttpClient:
+        """Build an HTTP client carrying the operator's network policy.
+
+        The AI gateway is a configured integration endpoint, so no website
+        scope is applied — but the proxy configuration, TLS verification,
+        request budget and timeout all are.
+        """
+        proxy = None
         try:
-            with urllib.request.urlopen(req, timeout=self.cfg.timeout_seconds) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            kind = {401: "auth", 403: "auth", 429: "rate_limit"}.get(exc.code, "http_error")
-            detail = ""
-            try:
-                detail = exc.read(400).decode("utf-8", "replace")
-            except OSError:
-                pass
-            return AIResult(ok=False, failure_kind=kind, error=f"HTTP {exc.code}: {detail[:300]}")
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            return AIResult(ok=False, failure_kind="unreachable", error=str(exc)[:300])
-        except json.JSONDecodeError:
-            return AIResult(ok=False, failure_kind="bad_response", error="provider returned non-JSON body")
+            from .config import Config as _Cfg
+
+            _global_cfg = _Cfg.load()
+            proxy = _global_cfg.proxy if _global_cfg.proxy.configured else None
+        except Exception:  # pragma: no cover — config load failure means proxy unset
+            proxy = None
+
+        return HttpClient(
+            scope=None,
+            proxy=proxy,
+            timeout=float(self.cfg.timeout_seconds),
+            verify_tls=True,
+            max_requests=max(1, self.cfg.max_retries + 1),
+            max_redirects=3,
+            user_agent="veyron/0.1",
+        )
+
+    def _auth_headers(self) -> dict[str, str]:
+        """Provider authentication header.
+
+        The API key is a credential: it is sent only to the configured
+        provider endpoint and is never written to a log or a report.
+        `HttpClient` logs URLs and status codes only, never headers.
+        """
+        if not self.cfg.api_key:
+            return {}
+        return {"Authorization": f"Bearer {self.cfg.api_key}"}
+
+    def _post(self, body: dict[str, Any]) -> AIResult:
+        """POST a chat completion through the shared HTTP client."""
+        url = self.cfg.base_url.rstrip("/") + "/chat/completions"
+        client = self._build_client()
+        response: HttpResponse = client.post_json(
+            url, body,
+            headers=self._auth_headers(),
+            timeout=float(self.cfg.timeout_seconds),
+        )
+
+        # HttpClient reports transport problems via error_kind and returns
+        # ok=True for any completed exchange, including 4xx/5xx — so the
+        # status code has to be classified explicitly.
+        if not response.ok:
+            kind = response.error_kind or ""
+            if kind not in _TRANSPORT_FAILURE_KINDS:
+                kind = "unreachable"
+            detail = response.error or ""
+            return AIResult(ok=False, failure_kind=kind, error=detail[:300])
+
+        status = response.status or 200
+        if status >= 400:
+            kind = _status_to_failure_kind(status)
+            detail = response.body[:400].decode("utf-8", "replace") if response.body else ""
+            return AIResult(ok=False, failure_kind=kind,
+                            error=f"HTTP {status}: {detail[:300]}")
+
+        try:
+            payload = response.json()
+        except (ValueError, json.JSONDecodeError):
+            return AIResult(ok=False, failure_kind="bad_response",
+                            error="provider returned non-JSON body")
 
         try:
             choice = payload["choices"][0]["message"]
