@@ -23,12 +23,29 @@
   request — scope enforcement, DNS resolution + destination-address
   validation (cloud-metadata blocked by default), redirect validation,
   request budgets, timeouts, cancellation, TLS verification on by default.
+- All remaining outbound HTTP paths migrated onto the shared network layer:
+  DAST (`veyron/dast.py`), the AI adapter (`veyron/ai.py`) and the OSV.dev
+  adapter (`veyron/adapters/osv.py`) no longer use `urllib.request`. The
+  shared layer is now the only sanctioned outbound HTTP path in the
+  codebase, so scope, proxy routing, fail-closed proxy behaviour, budgets,
+  timeouts and TLS verification apply uniformly. A repository-wide test
+  enforces this structurally.
+- AI adapter: the gateway is treated as an explicitly configured integration
+  endpoint, not a website assessment target — the website allowlist is not
+  applied to it, while proxy routing and TLS verification still are.
+- Fixed: `AIAdapter.healthcheck()` passed an unsupported `system_override=`
+  keyword, so every enabled healthcheck raised `TypeError`.
+- Fixed: DAST recorded whole `Set-Cookie` header values in its check output
+  and findings, leaking session cookie values into reports. Only the cookie
+  name and its security-relevant attributes (`HttpOnly`, `Secure`,
+  `SameSite`) are now recorded. Tokens in a `Location` header are masked too.
 - Proxy subsystem: HTTP/HTTPS CONNECT and SOCKS5 routing, optional local Tor
   SOCKS endpoint, fail-closed behaviour (a proxy failure never silently falls
   back to a direct connection), credential masking, `veyron proxy status` and
   `veyron proxy probe` diagnostics.
-- 182 unit tests (127 pre-existing + 55 network-layer tests); integration
-  tests run when real scanners are installed.
+- 221 unit tests (127 pre-existing + 55 network-layer tests + 39 migration
+  and AI-adapter tests); integration tests run when real scanners are
+  installed.
 - Original SVG logo suite and brand specification.
 - PolyForm Noncommercial licence (author: Xat01); GitHub Actions workflow for CI (`tests.yml`).
 

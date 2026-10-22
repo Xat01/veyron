@@ -143,7 +143,8 @@ class Config:
         da = data.get("dast")
         if isinstance(da, dict):
             for k in ("enabled", "allowlist", "max_requests", "max_minutes",
-                      "max_concurrency", "follow_redirects", "dry_run", "rate_limit_per_second"):
+                      "max_concurrency", "follow_redirects", "dry_run", "rate_limit_per_second",
+                      "timeout_seconds", "max_redirects"):
                 if k in da:
                     setattr(self.dast, k, da[k])
         net = data.get("network")
@@ -228,6 +229,10 @@ class Config:
                 problems.append("dast.max_requests must be > 0")
             if self.dast.max_concurrency < 1:
                 problems.append("dast.max_concurrency must be >= 1")
+            if not (1 <= self.dast.timeout_seconds <= 600):
+                problems.append("dast.timeout_seconds must be between 1 and 600")
+            if self.dast.max_redirects < 0:
+                problems.append("dast.max_redirects must be >= 0")
         if not (1 <= self.network.timeout_seconds <= 600):
             problems.append("network.timeout_seconds must be between 1 and 600")
         if self.network.max_requests <= 0:

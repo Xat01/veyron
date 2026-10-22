@@ -45,6 +45,30 @@ def test_file_overrides(tmp_path):
     assert cfg.exclusions == ["tests/*"]
 
 
+def test_dast_transport_fields_are_loadable(tmp_path):
+    """The DAST transport settings must be configurable from the config file."""
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({
+        "dast": {"timeout_seconds": 7, "max_redirects": 2},
+    }), encoding="utf-8")
+    cfg = Config.load(p)
+    assert cfg.dast.timeout_seconds == 7
+    assert cfg.dast.max_redirects == 2
+    assert cfg.validate() == []
+
+
+def test_dast_transport_fields_are_validated(tmp_path):
+    """Out-of-range DAST transport settings must be reported."""
+    p = tmp_path / "config.json"
+    p.write_text(json.dumps({
+        "dast": {"enabled": True, "allowlist": ["127.0.0.1:8080"],
+                 "timeout_seconds": 0},
+    }), encoding="utf-8")
+    cfg = Config.load(p)
+    problems = cfg.validate()
+    assert any("dast.timeout_seconds" in p for p in problems)
+
+
 def test_env_overrides(monkeypatch):
     monkeypatch.setenv("VEYRON_AI_ENABLED", "false")
     monkeypatch.setenv("VEYRON_AI_MODEL", "env-model")
