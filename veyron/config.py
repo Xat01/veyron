@@ -67,6 +67,9 @@ class DASTConfig:
     follow_redirects: bool = False
     dry_run: bool = True
     rate_limit_per_second: float = 2.0
+    # Transport settings forwarded to the shared HTTP client.
+    timeout_seconds: int = 15
+    max_redirects: int = 5
 
 
 @dataclass

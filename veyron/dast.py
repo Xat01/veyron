@@ -1,5 +1,10 @@
 """Controlled dynamic testing (DAST) — safe checks against authorised targets.
 
+Transport now uses the shared `HttpClient` (`veyron.net.client`) so that every
+outbound request benefits from scope enforcement, proxy routing with fail-closed
+proxy behaviour, redirect validation, request budgets, timeouts and TLS
+verification — consistent with the rest of VEYRON.
+
 Threat model and hard limits for this module:
 - Only hosts explicitly in the allowlist may be contacted (default: localhost).
 - Redirects are NOT followed cross-host; a redirect to a non-allowlisted host
@@ -20,13 +25,15 @@ from __future__ import annotations
 
 import json
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
+from typing import Any
+
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from urllib.parse import urljoin, urlparse
+
+from .net.client import HttpClient, HttpResponse, SENSITIVE_KEYS
+from .net.scope import Scope
 
 from .config import DASTConfig
 
@@ -80,7 +87,7 @@ def host_in_allowlist(url: str, allowlist: list[str]) -> bool:
     wildcard expansion beyond exact `host:port` entries or bare `host` which
     implies any port only when written explicitly as `host`).
     """
-    parsed = urllib.parse.urlparse(url)
+    parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         return False
     host = (parsed.hostname or "").lower()
@@ -138,10 +145,81 @@ class Budget:
         }
 
 
+def _cookie_summary(set_cookie: str) -> list[dict[str, str]]:
+    """Summarise Set-Cookie headers without retaining cookie values.
+
+    A cookie value is a session credential — it must never reach a report.
+    Only the cookie NAME and its security-relevant attributes (HttpOnly,
+    Secure, SameSite) are kept, which is exactly what the cookie-flag
+    analysis needs.
+
+    The previous implementation put the whole Set-Cookie string into the
+    "flags" field, which leaked session tokens into DAST reports.
+    """
+    out: list[dict[str, str]] = []
+    for raw in (set_cookie or "").split("\n"):
+        raw = raw.strip()
+        if not raw:
+            continue
+        parts = [p.strip() for p in raw.split(";")]
+        name = parts[0].partition("=")[0].strip()
+        if not name:
+            continue
+        attrs = [a for a in parts[1:]
+                 if a.partition("=")[0].strip().lower() in {"httponly", "secure", "samesite"}]
+        out.append({"name": name, "flags": "; ".join(attrs)})
+    return out
+
+
+def _redact_location(loc: str) -> str:
+    """Mask sensitive query values in a Location header.
+
+    Redirect targets are recorded in the check output, so any token carried
+    in the query string has to be masked first.
+    """
+    if not loc or "?" not in loc:
+        return loc
+    base, _, query = loc.partition("?")
+    pairs: list[str] = []
+    for pair in query.split("&"):
+        name, sep, _value = pair.partition("=")
+        if sep and name.lower() in SENSITIVE_KEYS:
+            pairs.append(f"{name}=***")
+        else:
+            pairs.append(pair)
+    return base + "?" + "&".join(pairs)
+
+
+def _scope_for_allowlist(cfg: DASTConfig) -> Scope:
+    """Build a Scope from the DAST allowlist entries.
+
+    The DAST allowlist and the shared Scope are derived from the same
+    `cfg.allowlist`, so the set of hosts DAST is willing to talk to and the
+    set the HTTP client will actually contact are identical.
+    """
+    entries: list[str] = []
+    for entry in cfg.allowlist:
+        entry = entry.strip()
+        if not entry:
+            continue
+        if ":" in entry:
+            entries.append(entry)
+        else:
+            # A bare host means "any port" for DAST's allowlist check.
+            entries.append(entry)
+            entries.append(f"{entry}:80")
+            entries.append(f"{entry}:443")
+    return Scope.from_allowlist(entries)
+
+
 def _safe_request(url: str, cfg: DASTConfig, budget: Budget, audit: list[AuditRecord]) -> tuple[int | None, dict[str, str], bytes, str | None]:
-    """GET a URL with all scope controls applied. Never follows redirects
-    automatically: urllib is configured not to, and any redirect target is
-    re-checked against the allowlist by the caller."""
+    """GET a URL via the shared HttpClient, preserving the same return shape.
+
+    Scope, proxy routing with fail-closed behaviour, redirect validation,
+    request budgets, timeouts, cancellation and TLS verification are
+    enforced by HttpClient; only the DAST audit and check models are kept.
+    The old urllib path is gone.
+    """
     if not host_in_allowlist(url, cfg.allowlist):
         audit.append(AuditRecord(AuditRecord.now(), url, "BLOCKED_OUT_OF_SCOPE", False,
                                  "host not in allowlist"))
@@ -151,35 +229,39 @@ def _safe_request(url: str, cfg: DASTConfig, budget: Budget, audit: list[AuditRe
                                  budget.exhausted_reason or "budget"))
         return None, {}, b"", budget.exhausted_reason or "budget"
 
-    audit.append(AuditRecord(AuditRecord.now(), url, "REQUEST", True))
-    req = urllib.request.Request(url, method="GET", headers={"User-Agent": USER_AGENT})
-    opener = urllib.request.build_opener(_NoRedirect())
-
-    class _Ctx:
-        pass
-
+    scope = _scope_for_allowlist(cfg)
     try:
-        # Follow AT MOST cfg-follow policy: we never auto-follow. Redirects
-        # are surfaced as 3xx and handled by the caller with allowlist checks.
-        with opener.open(req, timeout=15) as resp:
-            headers = {k.lower(): v for k, v in resp.headers.items()}
-            body = resp.read(64_000)
-            audit.append(AuditRecord(AuditRecord.now(), url, "RESPONSE", True, f"status={resp.status}"))
-            return resp.status, headers, body, None
-    except urllib.error.HTTPError as exc:
-        headers = {k.lower(): v for k, v in (exc.headers or {}).items()}
-        audit.append(AuditRecord(AuditRecord.now(), url, "RESPONSE", True, f"status={exc.code}"))
-        return exc.code, headers, b"", None
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        audit.append(AuditRecord(AuditRecord.now(), url, "ERROR", True, str(exc)[:200]))
-        return None, {}, b"", str(exc)[:200]
+        from .config import Config as _Cfg
 
+        _live_cfg = _Cfg.load()
+        proxy_cfg = _live_cfg.proxy if _live_cfg.proxy.configured else None
+    except Exception:  # pragma: no cover — config load failure means proxy unset
+        proxy_cfg = None
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Redirect handler that refuses to follow anything (scope safety)."""
+    audit.append(AuditRecord(AuditRecord.now(), url, "REQUEST", True))
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
-        return None
+    client = HttpClient(
+        scope=scope,
+        proxy=proxy_cfg,
+        timeout=cfg.timeout_seconds,
+        verify_tls=True,
+        max_requests=cfg.max_requests,
+        rate_limit_per_second=cfg.rate_limit_per_second,
+        max_redirects=cfg.max_redirects,
+        user_agent=USER_AGENT,
+    )
+    response: HttpResponse = client.get(url, allow_redirects=False)
+
+    status = response.status if response.ok else None
+    # Raw headers are returned (matching the previous contract) but every
+    # value that reaches the check output is sanitised by the caller.
+    headers = {k.lower(): v for k, v in response.headers.items()}
+    error = response.error
+    if status is None:
+        audit.append(AuditRecord(AuditRecord.now(), url, "ERROR", True, (error or "")[:200]))
+    else:
+        audit.append(AuditRecord(AuditRecord.now(), url, "RESPONSE", True, f"status={status}"))
+    return status, headers, response.body, error
 
 
 def run_dast(cfg: DASTConfig, *, target_url: str, execute: bool, authorized: bool) -> DASTResult:
@@ -273,18 +355,16 @@ def _run_safe_checks(cfg: DASTConfig, target_url: str, budget: Budget, audit: li
             "status": status,
             "security_headers_present": [h for h in SECURITY_HEADERS if h in headers],
             "security_headers_missing": [h for h in SECURITY_HEADERS if h not in headers],
-            "cookies": [
-                {"name": c.split("=")[0].strip(), "flags": c}
-                for cookie in (headers.get("set-cookie") or "").split("\n") if cookie.strip()
-                for c in [cookie]
-            ],
+            # Cookie values are session credentials: only the name and the
+            # security-relevant attributes are recorded.
+            "cookies": _cookie_summary(headers.get("set-cookie") or ""),
             "server": headers.get("server"),
             "error": err,
-            "redirect_location": headers.get("location"),
+            "redirect_location": _redact_location(headers.get("location") or ""),
         }
         if status in (301, 302, 303, 307, 308):
             loc = headers.get("location") or ""
-            in_scope = host_in_allowlist(urllib.parse.urljoin(url, loc), cfg.allowlist)
+            in_scope = host_in_allowlist(urljoin(url, loc), cfg.allowlist)
             check["redirect_blocked_as_out_of_scope"] = not in_scope
             if not in_scope:
                 audit.append(AuditRecord(AuditRecord.now(), loc, "REDIRECT_BLOCKED", False,
