@@ -6,6 +6,12 @@ fall back to a local cache and clearly mark results as cached.
 
 Advisory presence is NOT exploitability: findings produced here are marked
 ANALYSED at most, never VALIDATED.
+
+Network transport now goes through the shared HttpClient so that OSV calls
+benefit from proxy routing, TLS verification, timeouts, and fail-closed
+proxy behaviour — while being treated as a *vulnerability-intelligence
+service*, not a website assessment target. OSV calls therefore do NOT apply
+a website assessment's target allowlist.
 """
 
 from __future__ import annotations
@@ -13,14 +19,13 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..constants import DEFAULT_CACHE_DIR
 from ..finding import Finding, stable_finding_id
+from ..net.client import HttpClient, HttpResponse
 from .base import ScannerAdapter, ScanResult
 
 OSV_BATCH_URL = "https://api.osv.dev/v1/querybatch"
@@ -151,6 +156,27 @@ class OSVAdapter(ScannerAdapter):
         super().__init__(executable=executable or "osv", timeout=timeout, config=config)
         self.offline = bool(self.config.get("offline", False))
         self.cache = SCACache.load(Path(self.config.get("cache_path", DEFAULT_CACHE_DIR / "osv_cache.json")))
+        # OSV.dev is a vulnerability-intelligence service, not a website
+        # assessment target. The shared client is configured with no website
+        # scope so a website allowlist is not applied here, but proxy routing,
+        # TLS verification, budgets and timeouts still are.
+        proxy = None
+        try:
+            from ..config import Config as _Cfg
+
+            _global_cfg = _Cfg.load()
+            proxy = _global_cfg.proxy if _global_cfg.proxy.configured else None
+        except Exception:  # pragma: no cover — config load failure means proxy unset
+            proxy = None
+        self._client = HttpClient(
+            scope=None,
+            proxy=proxy,
+            timeout=float(timeout),
+            verify_tls=True,
+            user_agent=USER_AGENT,
+            max_requests=100,
+            max_redirects=5,
+        )
 
     def validate_config(self) -> tuple[bool, str | None]:
         # OSV adapter requires no local executable; network or cache needed.
@@ -237,17 +263,16 @@ class OSVAdapter(ScannerAdapter):
         chunk_size = 500
         for i in range(0, len(keys), chunk_size):
             chunk = keys[i:i + chunk_size]
-            body = json.dumps({
+            body: dict[str, Any] = {
                 "queries": [
                     {"package": {"name": n, "ecosystem": e}, "version": v}
                     for (e, n, v) in chunk
                 ]
-            }).encode("utf-8")
-            req = urllib.request.Request(OSV_BATCH_URL, data=body, method="POST",
-                                         headers={"Content-Type": "application/json",
-                                                  "User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                payload = json.loads(resp.read().decode("utf-8"))
+            }
+            response: HttpResponse = self._client.post_json(OSV_BATCH_URL, body)
+            if not response.ok:
+                raise OSError(f"OSV query failed: {response.error or response.error_kind}")
+            payload = response.json()
             results = payload.get("results", [])
             for key, res in zip(chunk, results):
                 vulns = res.get("vulns", []) or []
@@ -263,10 +288,11 @@ class OSVAdapter(ScannerAdapter):
         if cache_key in self.cache.entries:
             return self.cache.entries[cache_key]
         try:
-            req = urllib.request.Request(OSV_VULN_URL.format(id=vuln_id), headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-        except (OSError, json.JSONDecodeError, urllib.error.URLError):
+            response: HttpResponse = self._client.get(OSV_VULN_URL.format(id=vuln_id))
+            if not response.ok:
+                raise OSError(response.error or response.error_kind or "request failed")
+            data = response.json()
+        except (OSError, ValueError):
             return {"id": vuln_id, "summary": "", "enriched": False}
         self.cache.entries[cache_key] = data
         self.cache.save()
