@@ -34,6 +34,13 @@ class AIConfig:
     model: str = "free-reliable"
     timeout_seconds: int = DEFAULT_AI_TIMEOUT_SECONDS
     max_retries: int = DEFAULT_AI_MAX_RETRIES
+    # Endpoint policy: the AI provider is an explicitly configured service,
+    # not a website assessment target.  A dedicated host policy prevents an
+    # accidental redirect or config typo from sending assessment data
+    # elsewhere without applying the website allowlist.
+    allowed_hosts: list[str] = field(default_factory=list)
+    allow_remote: bool = True
+    offline: bool = False
 
     def masked(self) -> dict[str, Any]:
         """Config safe for display/logging: key is masked, never shown."""
@@ -52,6 +59,7 @@ class ScannerConfig:
     semgrep_config: str = "p/default"
     gitleaks_scan_history: bool = False
     osv_offline: bool = False
+    osv_base_url: str = "https://api.osv.dev/v1"
     enabled: list[str] = field(default_factory=lambda: ["semgrep", "bandit", "gitleaks", "osv"])
 
 
@@ -75,6 +83,15 @@ class DASTConfig:
     # Transport settings forwarded to the shared HTTP client.
     timeout_seconds: int = 15
     max_redirects: int = 5
+    # Extended authorization/validation settings (see veyron.assessment).
+    permitted_paths: list[str] = field(default_factory=list)
+    exclusions: list[str] = field(default_factory=list)
+    evidence_retention: str = "redacted"
+    stop_file: str | None = None
+    lab_environment: bool = False
+    callback_url: str | None = None
+    access_control_rules: list[dict[str, Any]] = field(default_factory=list)
+    identities: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -101,6 +118,9 @@ class Config:
     network: NetworkConfig = field(default_factory=NetworkConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     exclusions: list[str] = field(default_factory=list)
+    # Global offline switch: no external AI or vulnerability-intelligence
+    # requests are permitted while set.
+    offline: bool = False
     load_problems: list[str] = field(default_factory=list)
     dashboard_host: str = DEFAULT_DASHBOARD_HOST
     dashboard_port: int = DEFAULT_DASHBOARD_PORT
@@ -134,22 +154,32 @@ class Config:
     def _apply(self, data: dict[str, Any]) -> None:
         if not isinstance(data, dict):
             return
+        if "offline" in data:
+            self.offline = bool(data["offline"])
+        if self.offline:
+            self.ai.offline = True
+            self.scanners.osv_offline = True
         ai = data.get("ai")
         if isinstance(ai, dict):
-            for k in ("enabled", "base_url", "api_key", "model", "timeout_seconds", "max_retries"):
+            for k in ("enabled", "base_url", "api_key", "model", "timeout_seconds", "max_retries",
+                      "allowed_hosts", "allow_remote", "offline"):
                 if k in ai:
                     setattr(self.ai, k, ai[k])
         sc = data.get("scanners")
         if isinstance(sc, dict):
             for k in ("timeout_seconds", "max_file_size_bytes", "semgrep_path", "bandit_path",
-                      "gitleaks_path", "semgrep_config", "gitleaks_scan_history", "osv_offline", "enabled"):
+                      "gitleaks_path", "semgrep_config", "gitleaks_scan_history", "osv_offline",
+                      "osv_base_url", "enabled"):
                 if k in sc:
                     setattr(self.scanners, k, sc[k])
         da = data.get("dast")
         if isinstance(da, dict):
             for k in ("enabled", "allowlist", "max_requests", "max_minutes",
                       "max_concurrency", "follow_redirects", "dry_run", "rate_limit_per_second",
-                      "profile", "max_pages", "timeout_seconds", "max_redirects"):
+                      "profile", "max_pages", "timeout_seconds", "max_redirects",
+                      "permitted_paths", "exclusions", "evidence_retention", "stop_file",
+                      "lab_environment", "callback_url", "access_control_rules",
+                      "identities"):
                 if k in da:
                     setattr(self.dast, k, da[k])
         net = data.get("network")
@@ -187,6 +217,10 @@ class Config:
             self.reports_dir = Path(data["reports_dir"])
         if "history_path" in data:
             self.history_path = Path(data["history_path"])
+        # A global offline switch may not be overridden by a nested setting.
+        if self.offline:
+            self.ai.offline = True
+            self.scanners.osv_offline = True
 
     # -- persistence ----------------------------------------------------------
 
@@ -238,8 +272,12 @@ class Config:
                 problems.append("dast.timeout_seconds must be between 1 and 600")
             if self.dast.max_redirects < 0:
                 problems.append("dast.max_redirects must be >= 0")
-            if self.dast.profile not in {"passive", "safe-active"}:
-                problems.append("dast.profile must be 'passive' or 'safe-active'")
+            if self.dast.profile.lower() not in {
+                "passive", "safe-active", "controlled-validation", "lab-exploit",
+            }:
+                problems.append(
+                    "dast.profile must be passive, safe-active, controlled-validation or lab-exploit"
+                )
             if self.dast.max_pages < 1:
                 problems.append("dast.max_pages must be >= 1")
         if not (1 <= self.network.timeout_seconds <= 600):
@@ -279,6 +317,8 @@ def _env_overrides() -> dict[str, Any]:
         return os.environ.get(ENV_PREFIX + name, default)
 
     data: dict[str, Any] = {"ai": {}, "scanners": {}, "dast": {}, "network": {}, "proxy": {}}
+    if (v := get("OFFLINE")) is not None:
+        data["offline"] = v.strip().lower() in {"1", "true", "yes", "on"}
     if (v := get("AI_ENABLED")) is not None:
         data["ai"]["enabled"] = v.strip().lower() in {"1", "true", "yes", "on"}
     for env_key, cfg_key, cast in [
@@ -293,6 +333,14 @@ def _env_overrides() -> dict[str, Any]:
                 data["ai"][cfg_key] = cast(v)
             except ValueError:
                 pass
+    if (v := get("AI_ALLOW_REMOTE")) is not None:
+        data["ai"]["allow_remote"] = v.strip().lower() in {"1", "true", "yes", "on"}
+    if (v := get("AI_ALLOWED_HOSTS")) is not None:
+        data["ai"]["allowed_hosts"] = [x.strip() for x in v.split(",") if x.strip()]
+    if (v := get("AI_OFFLINE")) is not None:
+        data["ai"]["offline"] = v.strip().lower() in {"1", "true", "yes", "on"}
+    if (v := get("OSV_BASE_URL")) is not None:
+        data["scanners"]["osv_base_url"] = v.rstrip("/")
     if (v := get("SCANNER_TIMEOUT_SECONDS")) is not None:
         try:
             data["scanners"]["timeout_seconds"] = int(v)
@@ -362,5 +410,4 @@ def _env_overrides() -> dict[str, Any]:
         data["proxy"]["url"] = v.strip()
     if (v := get("ALL_PROXY")) is not None and "url" not in data["proxy"]:
         data["proxy"]["url"] = v.strip()
-    return {k: v for k, v in data.items() if v}
     return {k: v for k, v in data.items() if v}

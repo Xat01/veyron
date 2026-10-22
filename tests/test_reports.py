@@ -5,7 +5,16 @@ import json
 import pytest
 
 from veyron.finding import Finding, stable_finding_id
-from veyron.report.core import build_context, render_json, render_markdown, render_sarif, write_reports
+from veyron.report.core import (
+    build_context,
+    render_disclosure_draft,
+    render_finding_markdown,
+    render_html,
+    render_json,
+    render_markdown,
+    render_sarif,
+    write_reports,
+)
 
 
 def make_finding(**kw) -> Finding:
@@ -141,9 +150,126 @@ def test_write_reports_all_formats(tmp_path):
     assert set(written) == {"markdown", "json", "sarif"}
     for p in written.values():
         assert p.exists()
-        assert p.stat().st_size > 0
+
+
+def test_html_report_escapes_scanner_content():
+    f = make_finding(description="<script>alert(1)</script>",
+                     evidence="<img src=x onerror=alert(1)>")
+    doc = render_html(ctx(findings=[f]))
+    assert "<script>alert(1)</script>" not in doc
+    assert "&lt;script&gt;" in doc
+    assert "Content-Security-Policy" in doc
+    assert "default-src 'none'" in doc
+
+
+def test_html_report_contains_validation_and_remediation():
+    f = make_finding(
+        validation_status="VALIDATED",
+        endpoint="/search?q=x",
+        asset="app.test",
+        impact="Script execution in a victim browser.",
+        reproduction="GET /search?q=marker",
+        verification="Re-run and confirm encoding.",
+        validation_evidence={"observed": "marker reflected raw", "expected": "encoded"},
+    )
+    doc = render_html(ctx(findings=[f]))
+    assert "VALIDATED" in doc
+    assert "Script execution" in doc
+    assert "Re-run and confirm encoding" in doc
+
+
+def test_finding_report_has_required_sections():
+    f = make_finding(validation_status="CORROBORATED")
+    md = render_finding_markdown(ctx(findings=[f]), f.to_dict())
+    for heading in ("Affected asset and endpoint", "Technical explanation", "Evidence",
+                    "Validation", "Safe reproduction", "Impact", "Remediation and verification"):
+        assert heading in md
+
+
+def test_disclosure_draft_separates_confirmed_and_suspected():
+    confirmed = make_finding(validation_status="VALIDATED", title="Confirmed issue")
+    suspected = make_finding(validation_status="DETECTED", title="Suspected issue",
+                             id="VYN-SUSPECTED01")
+    draft = render_disclosure_draft(ctx(findings=[confirmed, suspected]))
+    confirmed_part, suspected_part = draft.split("## Suspected / needs review")
+    assert "Confirmed issue" in confirmed_part
+    assert "Suspected issue" in suspected_part
+    assert "SECURITY CONTACT" in draft
+    assert "did not contact anyone" in draft
+
+
+def test_write_reports_outputs_individual_and_disclosure(tmp_path):
+    written = write_reports(
+        ctx(), tmp_path, ("markdown",),
+        include_finding_reports=True, include_disclosure=True,
+    )
+    assert "disclosure" in written
+    assert any(k.startswith("finding:") and k.endswith(":md") for k in written)
+    assert any(k.startswith("finding:") and k.endswith(":json") for k in written)
+    assert written["disclosure"].stat().st_size > 0
 
 
 def test_write_reports_subset(tmp_path):
     written = write_reports(ctx(), tmp_path, ("json",))
     assert set(written) == {"json"}
+
+# -- HTML / individual / disclosure --------------------------------------------
+
+def test_html_escapes_finding_content_and_scanner_output():
+    f = make_finding(
+        title="<script>alert(1)</script>",
+        description="<img src=x onerror=alert(1)>",
+        evidence="<svg onload=alert(2)>",
+    )
+    doc = render_html(ctx(findings=[f]))
+    assert "<script>alert(1)</script>" not in doc
+    assert "<img src=x onerror=alert(1)>" not in doc
+    assert "&lt;script&gt;" in doc
+    assert "default-src 'none'" in doc
+
+
+def test_html_never_contains_raw_secret():
+    tok = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+    doc = render_html(ctx(findings=[make_finding(evidence="token " + tok)]))
+    assert tok not in doc
+
+
+def test_individual_finding_report_has_required_sections():
+    f = make_finding(
+        asset="https://app.test",
+        endpoint="https://app.test/search?q=x",
+        expected_behavior="input encoded",
+        observed_behavior="input reflected",
+        impact="script execution in a victim browser",
+        preconditions="victim clicks a link",
+        reproduction="GET /search?q=marker",
+        verification="re-test with the same marker",
+    )
+    md = render_finding_markdown(ctx(findings=[f]), f.to_dict())
+    for section in (
+        "Affected asset", "Technical explanation", "Evidence", "Validation",
+        "Safe reproduction", "Impact", "Remediation and verification", "References",
+    ):
+        assert section in md
+
+
+def test_disclosure_draft_separates_confirmed_and_suspected():
+    confirmed = make_finding(validation_status="VALIDATED")
+    suspected = make_finding(validation_status="CORROBORATED", title="Suspected bug")
+    draft = render_disclosure_draft(ctx(findings=[confirmed, suspected]))
+    assert "Confirmed findings" in draft
+    assert "Suspected" in draft
+    assert "[SECURITY CONTACT" in draft
+    assert "did not contact" in draft
+
+
+def test_write_reports_generates_html_findings_and_disclosure(tmp_path):
+    written = write_reports(
+        ctx(), tmp_path, ("html", "json"),
+        include_finding_reports=True, include_disclosure=True,
+    )
+    assert "html" in written and written["html"].exists()
+    assert "disclosure" in written and written["disclosure"].exists()
+    finding_keys = [k for k in written if k.startswith("finding:")]
+    assert len(finding_keys) == 2  # md + json for the single finding
+    assert (tmp_path / "findings").is_dir()

@@ -155,6 +155,7 @@ class OSVAdapter(ScannerAdapter):
     def __init__(self, *, executable: str | None = None, timeout: int = 60, config: dict[str, Any] | None = None):
         super().__init__(executable=executable or "osv", timeout=timeout, config=config)
         self.offline = bool(self.config.get("offline", False))
+        self.base_url = str(self.config.get("base_url", OSV_BATCH_URL.rsplit("/", 2)[0]))
         self.cache = SCACache.load(Path(self.config.get("cache_path", DEFAULT_CACHE_DIR / "osv_cache.json")))
         # OSV.dev is a vulnerability-intelligence service, not a website
         # assessment target. The shared client is configured with no website
@@ -165,7 +166,14 @@ class OSVAdapter(ScannerAdapter):
             from ..config import Config as _Cfg
 
             _global_cfg = _Cfg.load()
-            proxy = _global_cfg.proxy if _global_cfg.proxy.configured else None
+            if getattr(_global_cfg, "offline", False):
+                self.offline = True
+            _proxy = getattr(_global_cfg, "proxy", None)
+            proxy = _proxy if _proxy is not None and _proxy.configured else None
+            _scanners = getattr(_global_cfg, "scanners", None)
+            _base = getattr(_scanners, "osv_base_url", None)
+            if _base:
+                self.base_url = _base.rstrip("/")
         except Exception:  # pragma: no cover — config load failure means proxy unset
             proxy = None
         self._client = HttpClient(
@@ -269,7 +277,7 @@ class OSVAdapter(ScannerAdapter):
                     for (e, n, v) in chunk
                 ]
             }
-            response: HttpResponse = self._client.post_json(OSV_BATCH_URL, body)
+            response: HttpResponse = self._client.post_json(self.base_url.rstrip("/") + "/querybatch", body)
             if not response.ok:
                 raise OSError(f"OSV query failed: {response.error or response.error_kind}")
             payload = response.json()
@@ -288,7 +296,9 @@ class OSVAdapter(ScannerAdapter):
         if cache_key in self.cache.entries:
             return self.cache.entries[cache_key]
         try:
-            response: HttpResponse = self._client.get(OSV_VULN_URL.format(id=vuln_id))
+            response: HttpResponse = self._client.get(
+                self.base_url.rstrip("/") + "/vulns/" + str(vuln_id)
+            )
             if not response.ok:
                 raise OSError(response.error or response.error_kind or "request failed")
             data = response.json()

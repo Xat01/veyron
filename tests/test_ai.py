@@ -320,3 +320,42 @@ def test_model_output_treated_as_untrusted_data():
     # transition still requires substantive evidence reason via code path:
     assert f.transition("VALIDATED", injection) is False
     assert f.validation_status == "DETECTED"
+
+def test_offline_policy_makes_no_request(monkeypatch):
+    calls = []
+    monkeypatch.setattr(HttpClient, "post_json", lambda *a, **k: calls.append(a) or FakeResp())
+    res = AIAdapter(cfg(offline=True)).chat("hi")
+    assert res.ok is False
+    assert res.failure_kind == "disabled"
+    assert calls == []
+
+
+def test_remote_endpoint_requires_allow_remote(monkeypatch):
+    calls = []
+    monkeypatch.setattr(HttpClient, "post_json", lambda *a, **k: calls.append(a) or FakeResp())
+    res = AIAdapter(cfg(base_url="https://api.example.test/v1", allow_remote=False)).chat("hi")
+    assert res.failure_kind == "disabled"
+    assert calls == []
+
+
+def test_ai_allowed_hosts_is_enforced(monkeypatch):
+    calls = []
+    monkeypatch.setattr(HttpClient, "post_json", lambda *a, **k: calls.append(a) or FakeResp())
+    res = AIAdapter(cfg(base_url="https://api.example.test/v1",
+                        allowed_hosts=["gateway.local"])).chat("hi")
+    assert res.failure_kind == "disabled"
+    assert calls == []
+
+
+def test_ai_allowed_hosts_match_proceeds(monkeypatch):
+    seen = {}
+
+    def fake_post(self, url, payload, **kw):
+        seen["url"] = url
+        return FakeResp({"choices": [{"message": {"content": "ok"}}]})
+
+    monkeypatch.setattr(HttpClient, "post_json", fake_post)
+    res = AIAdapter(cfg(base_url="https://api.example.test/v1",
+                        allowed_hosts=["api.example.test"])).chat("hi")
+    assert res.ok is True
+    assert seen["url"] == "https://api.example.test/v1/chat/completions"

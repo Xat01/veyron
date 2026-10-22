@@ -174,3 +174,47 @@ def test_dast_summary_output_is_human_readable(tmp_path, capsys, monkeypatch):
     assert "plan:" in out
     assert not out.lstrip().startswith("{")
     assert code == 0
+
+def test_scan_profiles_control_scanners_and_ai(monkeypatch, tmp_path):
+    """Presets must change scanner set / AI without touching the target."""
+    import veyron.cli as cli_mod
+    from veyron.config import Config
+
+    captured = {}
+
+    class FakeOrch:
+        def __init__(self, cfg, progress=None):
+            captured["enabled"] = list(cfg.scanners.enabled)
+            captured["ai"] = cfg.ai.enabled
+
+        def run(self, target, formats=None):
+            from veyron.orchestrator import AssessmentOutcome
+            return AssessmentOutcome(
+                assessment_id="test", target=str(target), findings=[],
+                grouping_log=[], scan_results=[], discovery=None,
+                reports={}, context={"severity_counts": {}},
+            )
+
+    monkeypatch.setattr(cli_mod, "Orchestrator", FakeOrch)
+
+    args_quick = type("A", (), {})()
+    for name, value in dict(
+        target=str(tmp_path), exclude=[], format="json", offline_sca=False,
+        no_scanner=[], profile="quick", no_ai=False,
+    ).items():
+        setattr(args_quick, name, value)
+    cli_mod.cmd_scan(args_quick, Config())
+    assert set(captured["enabled"]) <= {"gitleaks", "osv"}
+    assert captured["ai"] is False
+
+    args_deep = type("A", (), {})()
+    for name, value in dict(
+        target=str(tmp_path), exclude=[], format="json", offline_sca=False,
+        no_scanner=[], profile="deep", no_ai=False,
+    ).items():
+        setattr(args_deep, name, value)
+    cfg = Config()
+    cfg.ai.enabled = True
+    cli_mod.cmd_scan(args_deep, cfg)
+    assert captured["ai"] is True
+    assert "semgrep" in captured["enabled"]

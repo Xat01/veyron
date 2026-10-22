@@ -20,6 +20,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlsplit
 
 from .config import AIConfig
 from .net.client import HttpClient, HttpResponse
@@ -95,6 +96,15 @@ class AIAdapter:
     ) -> AIResult:
         if not self.cfg.enabled:
             return AIResult(ok=False, failure_kind="disabled", error="AI assistance disabled by configuration")
+        if self.cfg.offline:
+            return AIResult(
+                ok=False,
+                failure_kind="disabled",
+                error="AI requests are disabled by offline policy",
+            )
+        endpoint_error = self._endpoint_policy_error()
+        if endpoint_error:
+            return AIResult(ok=False, failure_kind="disabled", error=endpoint_error)
 
         started = time.monotonic()
         system_text = system or self.SYSTEM_PROMPT
@@ -132,6 +142,23 @@ class AIAdapter:
         last_error.duration_seconds = time.monotonic() - started
         last_error.retries = attempts_made - 1 if attempts_made else 0
         return last_error
+
+    def _endpoint_policy_error(self) -> str | None:
+        """Enforce the AI integration's own endpoint policy, not website scope."""
+        try:
+            parts = urlsplit(self.cfg.base_url)
+            host = (parts.hostname or "").lower()
+            if parts.scheme not in {"http", "https"} or not host:
+                return "AI provider endpoint must be an http(s) URL with a host"
+            if not self.cfg.allow_remote and host not in {"localhost", "127.0.0.1", "::1"}:
+                return "AI provider endpoint is remote but allow_remote is disabled"
+            if self.cfg.allowed_hosts and not any(
+                host == item.lower().strip() for item in self.cfg.allowed_hosts
+            ):
+                return "AI provider host is outside configured AI endpoint policy"
+        except ValueError:
+            return "AI provider endpoint is invalid"
+        return None
 
     def _build_client(self) -> HttpClient:
         """Build an HTTP client carrying the operator's network policy.

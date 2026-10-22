@@ -31,6 +31,9 @@ class AssessmentOutcome:
     scan_results: list[dict[str, Any]]
     discovery: DiscoveryResult
     reports: dict[str, Path] = field(default_factory=dict)
+    # Per-finding reports and the disclosure draft are written to disk but
+    # kept out of `reports` so the long-standing core-format contract holds.
+    extra_reports: dict[str, Path] = field(default_factory=dict)
     context: dict[str, Any] = field(default_factory=dict)
     interrupted: bool = False
     duration_seconds: float = 0.0
@@ -164,15 +167,29 @@ class Orchestrator:
 
         if not self._cancel:
             out_dir = self.cfg.reports_dir / assessment_id
-            outcome.reports = write_reports(context, out_dir, formats)
-            self._append_history(context, outcome.reports)
+            written = write_reports(
+                context, out_dir, formats,
+                include_finding_reports=True, include_disclosure=True,
+            )
+            outcome.reports = {k: v for k, v in written.items()
+                               if k in {"markdown", "json", "sarif", "html"}}
+            outcome.extra_reports = {k: v for k, v in written.items()
+                                     if k not in outcome.reports}
+            self._append_history(context, {**outcome.reports, **outcome.extra_reports})
             self.progress(f"[{assessment_id}] reports written: "
                           + ", ".join(str(p) for p in outcome.reports.values()))
         else:
             # Interrupted assessment: still write partial reports, flagged.
             out_dir = self.cfg.reports_dir / f"{assessment_id}-partial"
-            outcome.reports = write_reports(context, out_dir, formats)
-            self._append_history(context, outcome.reports)
+            written = write_reports(
+                context, out_dir, formats,
+                include_finding_reports=True, include_disclosure=True,
+            )
+            outcome.reports = {k: v for k, v in written.items()
+                               if k in {"markdown", "json", "sarif", "html"}}
+            outcome.extra_reports = {k: v for k, v in written.items()
+                                     if k not in outcome.reports}
+            self._append_history(context, {**outcome.reports, **outcome.extra_reports})
             self.progress(f"[{assessment_id}] partial reports written to {out_dir}")
 
         return outcome
@@ -219,6 +236,7 @@ class Orchestrator:
                 "findings": len(context.get("findings", [])),
                 "severity_counts": context.get("severity_counts", {}),
                 "interrupted": context.get("interrupted", False),
+                "profile": context.get("profile"),
                 "coverage_warning": context.get("coverage_warning"),
                 "failed_scanners": [
                     t.get("scanner") for t in context.get("tools", []) if not t.get("ok")

@@ -23,7 +23,8 @@ def build_adapters(cfg: Config) -> dict[str, ScannerAdapter]:
         "gitleaks": GitleaksAdapter(executable=sc.gitleaks_path, timeout=sc.timeout_seconds,
                                     config={"scan_history": sc.gitleaks_scan_history}),
         "osv": OSVAdapter(timeout=min(sc.timeout_seconds, 60),
-                          config={"offline": sc.osv_offline}),
+                          config={"offline": sc.osv_offline or cfg.offline,
+                                  "base_url": sc.osv_base_url}),
     }
     return {name: adapter for name, adapter in all_adapters.items() if name in sc.enabled}
 

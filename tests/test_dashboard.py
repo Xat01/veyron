@@ -182,3 +182,62 @@ def test_serve_refuses_nonloopback(tmp_path, monkeypatch):
     monkeypatch.delenv("VEYRON_DASHBOARD_ALLOW_NONLOCAL", raising=False)
     cfg = Config()
     assert serve(cfg, host="0.0.0.0", port=1) == 2
+
+def test_finding_page_escapes_and_loads_confined_report(cfg):
+    cfg.reports_dir.mkdir(parents=True)
+    report = cfg.reports_dir / "abc.json"
+    report.write_text(json.dumps({
+        "target": "https://app.test",
+        "findings": [{
+            "id": "VYN-1", "title": "<script>alert(1)</script>",
+            "description": "<img src=x onerror=alert(1)>", "severity": "high",
+            "confidence": "high", "validation_status": "VALIDATED",
+            "asset": "app.test", "endpoint": "https://app.test/x",
+            "evidence": "<svg onload=alert(2)>",
+            "validation_evidence": {"observed": "marker", "request": "GET /x"},
+        }],
+    }), encoding="utf-8")
+    cfg.history_path.write_text(json.dumps({
+        "assessment_id": "abc",
+        "reports": {"json": str(report)},
+    }) + "\n", encoding="utf-8")
+    with _Server(cfg) as srv:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{srv.port}/finding?assessment=abc&id=VYN-1", timeout=5
+        ) as resp:
+            body = resp.read().decode()
+    assert resp.status == 200
+    assert "<script>alert(1)</script>" not in body
+    assert "&lt;script&gt;" in body
+    assert "<img src=x" not in body
+
+
+def test_finding_page_rejects_report_outside_reports_dir(cfg, tmp_path):
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}", encoding="utf-8")
+    cfg.history_path.write_text(json.dumps({
+        "assessment_id": "abc", "reports": {"json": str(outside)},
+    }) + "\n", encoding="utf-8")
+    with _Server(cfg) as srv:
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{srv.port}/finding?assessment=abc&id=X", timeout=5
+            )
+            assert False, "expected 404"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+
+
+def test_report_export_route_serves_recorded_file(cfg):
+    cfg.reports_dir.mkdir(parents=True)
+    md = cfg.reports_dir / "abc.md"
+    md.write_text("# report", encoding="utf-8")
+    cfg.history_path.write_text(json.dumps({
+        "assessment_id": "abc", "reports": {"markdown": str(md)},
+    }) + "\n", encoding="utf-8")
+    with _Server(cfg) as srv:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{srv.port}/report/abc/markdown", timeout=5
+        ) as resp:
+            assert resp.status == 200
+            assert resp.read() == b"# report"

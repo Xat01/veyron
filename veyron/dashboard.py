@@ -34,6 +34,7 @@ EMPTY_STATE = {
     "recent": [],
     "scanner_failures": [],
     "warnings": [],
+    "proxy": {},
 }
 
 
@@ -95,6 +96,8 @@ def build_dashboard_data(cfg: Config) -> dict[str, Any]:
         "recent": entries[-10:][::-1],
         "scanner_failures": failures[-10:],
         "warnings": warnings[-10:],
+        "proxy": cfg.proxy.masked(),
+        "offline": cfg.offline,
     }
 
 
@@ -120,6 +123,93 @@ def _validation_counts_from_latest(cfg: Config, entries: list[dict[str, Any]]) -
         if isinstance(counts, dict):
             return counts
     return {}
+
+
+MAX_REPORT_BYTES = 20_000_000
+
+
+def _confined(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def load_assessment_context(cfg: Config, assessment_id: str) -> dict[str, Any] | None:
+    """Load one assessment's JSON report, confined to the reports directory."""
+    if not assessment_id or any(ch not in "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                "abcdefghijklmnopqrstuvwxyz-_" for ch in assessment_id):
+        return None
+    for entry in load_history(cfg):
+        if entry.get("assessment_id") != assessment_id:
+            continue
+        raw = (entry.get("reports") or {}).get("json")
+        if not raw:
+            return None
+        path = Path(raw)
+        if not _confined(path, cfg.reports_dir) or not path.exists():
+            return None
+        try:
+            if path.stat().st_size > MAX_REPORT_BYTES:
+                return None
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+    return None
+
+
+def recorded_report_path(cfg: Config, assessment_id: str, fmt: str) -> Path | None:
+    """Return a report path only if history recorded it and it is confined."""
+    if fmt not in {"json", "markdown", "sarif", "html", "disclosure"}:
+        return None
+    for entry in load_history(cfg):
+        if entry.get("assessment_id") != assessment_id:
+            continue
+        raw = (entry.get("reports") or {}).get(fmt)
+        if not raw:
+            return None
+        path = Path(raw)
+        if _confined(path, cfg.reports_dir) and path.exists() and path.is_file():
+            return path
+        return None
+    return None
+
+
+def render_finding_page(context: dict[str, Any], finding_id: str) -> str | None:
+    finding = next((f for f in context.get("findings", [])
+                    if str(f.get("id")) == finding_id), None)
+    if finding is None:
+        return None
+    ve = finding.get("validation_evidence") or {}
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy"
+ content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'">
+<title>{_e(finding.get('title'))}</title>
+<style>body{{margin:0;background:#0d1117;color:#d7dde6;font:14px/1.6 system-ui,sans-serif}}
+main{{max-width:900px;margin:0 auto;padding:24px}}h1{{font-size:20px}}
+pre{{white-space:pre-wrap;overflow-wrap:anywhere;background:#0a0e13;border:1px solid #232b36;
+border-radius:6px;padding:10px}}.muted{{color:#8b97a7}}a{{color:#4fd1c5}}
+section{{border-top:1px solid #232b36;margin-top:18px;padding-top:10px}}</style></head>
+<body><main><p><a href="/">&larr; dashboard</a></p>
+<h1>{_e(finding.get('title'))}</h1>
+<p class="muted">ID <code>{_e(finding.get('id'))}</code> · severity {_e(finding.get('severity'))} ·
+confidence {_e(finding.get('confidence'))} · state {_e(finding.get('validation_status'))}</p>
+<p><b>Asset:</b> {_e(finding.get('asset') or context.get('target'))}<br>
+<b>Endpoint:</b> {_e(finding.get('endpoint') or finding.get('file_path') or 'n/a')}</p>
+<p>{_e(finding.get('description'))}</p>
+<section><h2>Evidence</h2><pre>{_e(str(finding.get('evidence') or '')[:5000])}</pre></section>
+<section><h2>Validation evidence</h2><pre>{_e(json.dumps(ve, indent=2, default=str)[:8000])}</pre></section>
+<section><h2>Impact and reproduction</h2>
+<p><b>Impact:</b> {_e(finding.get('impact') or 'Not separately assessed.')}</p>
+<p><b>Preconditions:</b> {_e(finding.get('preconditions') or 'Not recorded.')}</p>
+<pre>{_e(finding.get('reproduction') or ve.get('request') or 'Not recorded.')}</pre></section>
+<section><h2>Remediation and verification</h2>
+<p><b>Remediation:</b> {_e(finding.get('remediation') or 'Not recorded.')}</p>
+<p><b>Verification:</b> {_e(finding.get('verification') or 'Not recorded.')}</p></section>
+</main></body></html>"""
 
 
 # ---------------------------------------------------------------------------
@@ -261,10 +351,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
     CSP = ("default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; "
            "form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 
-    def _send(self, code: int, body: bytes, ctype: str = "text/html; charset=utf-8") -> None:
+    def _send(self, code: int, body: bytes, ctype: str = "text/html; charset=utf-8",
+              extra: dict[str, str] | None = None) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for key, value in (extra or {}).items():
+            self.send_header(key, value)
         self.send_header("Content-Security-Policy", self.CSP)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
@@ -312,6 +405,50 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._send(404, b"not found", "text/plain")
         elif path == "/healthz":
             self._send(200, b'{"status":"ok"}', "application/json")
+        elif path == "/finding":
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            aid = (query.get("assessment") or [""])[0]
+            fid = (query.get("id") or [""])[0]
+            if not aid or not fid:
+                self._send(400, b"assessment and id required", "text/plain")
+                return
+            ctx = load_assessment_context(self.cfg, aid)
+            if ctx is None:
+                self._send(404, b"assessment not found", "text/plain")
+                return
+            page = render_finding_page(ctx, fid)
+            if page is None:
+                self._send(404, b"finding not found", "text/plain")
+                return
+            self._send(200, page.encode("utf-8"))
+        elif path.startswith("/report/"):
+            # /report/<assessment_id>/<fmt>  (fmt: json, markdown, sarif, html)
+            parts = path.split("/")
+            if len(parts) != 4:
+                self._send(404, b"not found", "text/plain")
+                return
+            _, aid, fmt = parts[1], parts[2], parts[3]
+            rpath = recorded_report_path(self.cfg, aid, fmt)
+            if rpath is None:
+                self._send(404, b"report not found", "text/plain")
+                return
+            ctype = {
+                "json": "application/json; charset=utf-8",
+                "markdown": "text/markdown; charset=utf-8",
+                "sarif": "application/sarif+json; charset=utf-8",
+                "html": "text/html; charset=utf-8",
+            }.get(fmt, "application/octet-stream")
+            self._send(200, rpath.read_bytes(), ctype)
+        elif path.startswith("/disclosure/"):
+            aid = path.split("/")[2] if len(path.split("/")) >= 3 else ""
+            if not aid:
+                self._send(404, b"not found", "text/plain")
+                return
+            rpath = recorded_report_path(self.cfg, aid, "disclosure")
+            if rpath is None:
+                self._send(404, b"disclosure draft not found", "text/plain")
+                return
+            self._send(200, rpath.read_bytes(), "text/markdown; charset=utf-8")
         else:
             self._send(404, b"not found", "text/plain")
 

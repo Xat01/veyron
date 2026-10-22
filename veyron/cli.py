@@ -40,11 +40,14 @@ def _build_parser() -> argparse.ArgumentParser:
     scan.add_argument("target", metavar="PATH", help="Path to the repository to assess")
     scan.add_argument("--exclude", action="append", default=[], metavar="GLOB",
                       help="Glob pattern to exclude (repeatable)")
-    scan.add_argument("--format", choices=["markdown", "json", "sarif", "all"], default="all")
+    scan.add_argument("--format", choices=["markdown", "json", "sarif", "html", "all"], default="all")
     scan.add_argument("--offline-sca", action="store_true",
                       help="Do not query OSV API; use local cache only")
     scan.add_argument("--no-scanner", action="append", default=[], metavar="NAME",
                       help="Disable a scanner for this run (repeatable: semgrep, bandit, gitleaks, osv)")
+    scan.add_argument("--profile", choices=["quick", "standard", "deep"], default="standard",
+                      help="quick: fast secrets/deps scan; standard: all scanners; "
+                           "deep: all scanners plus AI enrichment")
 
     sub.add_parser("doctors", help="Check scanner availability, AI health, and configuration", parents=[common])
     sub.add_parser("scanners", help="List scanner availability and versions", parents=[common])
@@ -80,9 +83,29 @@ def _build_parser() -> argparse.ArgumentParser:
     dast.add_argument("-y", "--yes", action="store_true",
                       help="Shorthand for --execute --authorize: scope the given "
                            "target and run the assessment")
-    dast.add_argument("--profile", choices=("passive", "safe-active"), default=None,
-                      help="Assessment profile: passive (default) or safe-active "
-                           "(same-origin crawl + read-only HTML/form analysis)")
+    dast.add_argument("--profile",
+                      choices=("passive", "safe-active", "controlled-validation", "lab-exploit"),
+                      default=None,
+                      help="Assessment profile. controlled-validation requires --execute "
+                           "--authorize; lab-exploit additionally requires --lab-environment")
+    dast.add_argument("--permit-path", action="append", default=[], metavar="PREFIX",
+                      help="Restrict requests to this path prefix (repeatable)")
+    dast.add_argument("--exclude-host", action="append", default=[], metavar="HOST",
+                      help="Explicitly exclude a host/subdomain (repeatable)")
+    dast.add_argument("--max-requests", type=int, default=None,
+                      help="Override the per-assessment request budget")
+    dast.add_argument("--rate-limit", type=float, default=None,
+                      help="Override requests per second")
+    dast.add_argument("--stop-file", default=None,
+                      help="Emergency stop: abort when this file appears")
+    dast.add_argument("--lab-environment", action="store_true",
+                      help="Assert the target is an isolated/disposable lab environment")
+    dast.add_argument("--evidence-retention",
+                      choices=("none", "metadata", "redacted", "full"), default=None,
+                      help="How much sanitised evidence to retain in reports")
+    dast.add_argument("--report-dir", default=None, metavar="DIR",
+                      help="Write markdown/json/sarif/html reports, per-finding "
+                           "reports and a disclosure draft to DIR")
     return p
 
 
@@ -91,7 +114,8 @@ def _print(msg: str) -> None:
 
 
 def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
-    formats = ("markdown", "json", "sarif") if args.format == "all" else (args.format,)
+    formats = (("markdown", "json", "sarif", "html") if args.format == "all"
+               else (args.format,))
     if args.no_ai:
         cfg.ai.enabled = False
     if args.offline_sca:
@@ -100,6 +124,15 @@ def cmd_scan(args: argparse.Namespace, cfg: Config) -> int:
         cfg.exclusions = list(cfg.exclusions) + list(args.exclude)
     if args.no_scanner:
         cfg.scanners.enabled = [s for s in cfg.scanners.enabled if s not in set(args.no_scanner)]
+    # Scan presets trade coverage for speed. AI enrichment is opt-in for
+    # "deep" only; it is never enabled implicitly otherwise.
+    if args.profile == "quick":
+        cfg.scanners.enabled = [s for s in cfg.scanners.enabled if s in {"gitleaks", "osv"}]
+        cfg.ai.enabled = False
+    elif args.profile == "standard":
+        cfg.ai.enabled = False
+    elif args.profile == "deep":
+        pass  # keep configured AI setting
 
     target = Path(args.target)
     _print(f"{APP_DISPLAY_NAME} {__version__} — assessing {target}")
@@ -272,9 +305,14 @@ def _print_dast_result(result: Any) -> None:
         if result.findings:
             _print(f"  findings:   {len(result.findings)}")
             for finding in result.findings:
-                _print(f"    [{finding['severity'].upper()}] {finding['title']}")
-                if finding.get("detail"):
-                    _print(f"      {finding['detail']}")
+                state = finding.get("validation_status") or "DETECTED"
+                _print(f"    [{finding['severity'].upper()}] {finding['title']} "
+                       f"[{state}]")
+                detail = finding.get("description") or finding.get("detail")
+                if detail:
+                    _print(f"      {detail}")
+                if state != "VALIDATED":
+                    _print("      unverified — evidence is not sufficient for confirmation")
         else:
             _print("  findings:   none from the safe checks")
         blocked = sum(
@@ -288,6 +326,74 @@ def _print_dast_result(result: Any) -> None:
 
     for note in result.skipped:
         _print(f"  note:       {note}")
+
+
+def _write_dast_reports(result: Any, out_dir: Path) -> dict[str, Path]:
+    """Convert DAST dict findings into the shared report model and write them."""
+    from datetime import datetime, timezone
+
+    from .finding import Finding, stable_finding_id
+    from .report.core import build_context, write_reports
+
+    findings: list[Finding] = []
+    for fd in result.findings:
+        endpoint = str(fd.get("endpoint") or "")
+        source = str(fd.get("source") or "dast.webcheck")
+        findings.append(Finding(
+            id=stable_finding_id(source, str(fd.get("category") or ""), endpoint,
+                                 None, str(fd.get("title") or "")),
+            title=str(fd.get("title") or "DAST finding"),
+            description=str(fd.get("description") or ""),
+            category=str(fd.get("category") or "unknown"),
+            severity=str(fd.get("severity") or "unknown"),
+            confidence=str(fd.get("confidence") or "unknown"),
+            validation_status=str(fd.get("validation_status") or "DETECTED"),
+            source=source,
+            file_path=endpoint or None,
+            line=None,
+            evidence=str(fd.get("evidence") or ""),
+            remediation=fd.get("remediation"),
+            asset=fd.get("asset") or endpoint,
+            endpoint=endpoint,
+            expected_behavior=fd.get("expected_behavior"),
+            observed_behavior=fd.get("observed_behavior"),
+            impact=fd.get("impact"),
+            preconditions=fd.get("preconditions"),
+            reproduction=fd.get("reproduction"),
+            verification=fd.get("verification"),
+            tool="veyron-dast",
+            validation_evidence=dict(fd.get("validation_evidence") or {}),
+            raw=dict(fd),
+        ))
+    context = build_context(
+        target=result.target,
+        findings=findings,
+        grouping_log=[],
+        discovery_summary={
+            "file_count": 0, "total_bytes": 0, "excluded_dirs": [],
+            "skipped_files": [], "unsupported_extensions": [], "components": [],
+        },
+        scan_results=[{
+            "scanner": "dast", "ok": bool(result.ok), "version": __version__,
+            "duration_seconds": 0, "error": "; ".join(result.errors) or None,
+            "failure_kind": None, "exit_code": 0,
+            "raw_findings": len(result.findings), "metadata": {}},
+        ],
+        ai_enabled=False,
+        scope_notes=[
+            f"Website assessment profile: {result.profile}",
+            f"Requests used: {result.budget.get('used', 0)}/"
+            f"{result.budget.get('max_requests', '?')}",
+            *result.skipped,
+        ],
+        assessment_id=f"dast-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}",
+        profile=result.profile,
+        assessment_scope=result.authorization,
+    )
+    return write_reports(
+        context, out_dir, ("markdown", "json", "sarif", "html"),
+        include_finding_reports=True, include_disclosure=True,
+    )
 
 
 def cmd_dast(args: argparse.Namespace, cfg: Config) -> int:
@@ -308,6 +414,21 @@ def cmd_dast(args: argparse.Namespace, cfg: Config) -> int:
         if entry:
             cfg.dast.allowlist = list(cfg.dast.allowlist) + [entry]
 
+    if getattr(args, "permit_path", None):
+        cfg.dast.permitted_paths = list(cfg.dast.permitted_paths) + list(args.permit_path)
+    if getattr(args, "exclude_host", None):
+        cfg.dast.exclusions = list(cfg.dast.exclusions) + list(args.exclude_host)
+    if getattr(args, "max_requests", None) is not None:
+        cfg.dast.max_requests = args.max_requests
+    if getattr(args, "rate_limit", None) is not None:
+        cfg.dast.rate_limit_per_second = args.rate_limit
+    if getattr(args, "stop_file", None):
+        cfg.dast.stop_file = args.stop_file
+    if getattr(args, "lab_environment", False):
+        cfg.dast.lab_environment = True
+    if getattr(args, "evidence_retention", None):
+        cfg.dast.evidence_retention = args.evidence_retention
+
     result = run_dast(
         cfg.dast,
         target_url=args.target_url,
@@ -321,6 +442,13 @@ def cmd_dast(args: argparse.Namespace, cfg: Config) -> int:
         print(json.dumps(asdict(result), indent=2, default=str))
     else:
         _print_dast_result(result)
+    if getattr(args, "report_dir", None) and execute and result.authorized_ok:
+        try:
+            written = _write_dast_reports(result, Path(args.report_dir))
+            _print(f"  reports:    {len(written)} file(s) written to {args.report_dir}")
+        except OSError as exc:
+            print(f"error writing reports: {exc}", file=sys.stderr)
+            return 2
     if not result.authorized_ok:
         return 3
     if not execute:
