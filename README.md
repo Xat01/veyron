@@ -34,8 +34,10 @@ and writes human-readable and machine-readable reports.
   `safe-active` profile adds a bounded same-origin crawl and passive
   HTML/form analysis — no exploitation, fuzzing, or form submission.
   Profile-gated modular web checks (XSS, SQL-injection error differential,
-  SSTI arithmetic, SSRF via operator callback, and operator-declared broken
-  access control) validate only what they actually observed, and say so.
+  SSTI arithmetic, path traversal, non-destructive command injection, SSRF via
+  operator/loopback callback, operator-declared broken access control, and
+  benign prompt injection against nominated LLM endpoints) validate only what
+  they actually observed, and say so.
 - **Four assessment profiles** — `PASSIVE`, `SAFE_ACTIVE`,
   `CONTROLLED_VALIDATION`, and `LAB_EXPLOIT`. Each declares what evidence it
   may collect; higher profiles require explicit authorisation (`LAB_EXPLOIT`
@@ -100,6 +102,10 @@ veyron dast http://127.0.0.1:8080/ --execute --authorize --profile safe-active
 # Controlled validation, restricted to a path prefix, with reports on disk.
 veyron dast http://127.0.0.1:8080/ --profile controlled-validation `
   --execute --authorize --permit-path /app --report-dir .\reports\dast
+
+# Probe an authorised LLM endpoint for prompt injection (explicitly nominated).
+veyron dast http://127.0.0.1:8080/ --profile controlled-validation `
+  --execute --authorize --llm-endpoint http://127.0.0.1:8080/chat
 ```
 
 ## Proxy and network routing

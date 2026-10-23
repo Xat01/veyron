@@ -12,6 +12,7 @@ from veyron.validation import (
     CLASS_ACCESS_CONTROL,
     CLASS_DEPENDENCY,
     CLASS_INJECTION,
+    CLASS_PROMPT_INJECTION,
     ValidationEvidence,
     apply_outcome,
     correlate_confidence,
@@ -223,3 +224,72 @@ def test_confidence_uses_independent_sources():
     assert correlate_confidence([]) == "low"
     assert correlate_confidence(["scanner"]) == "medium"
     assert correlate_confidence(["scanner", "manual"], independent_evidence=1) == "high"
+
+def test_prompt_injection_requires_observed_instruction_following():
+    outcome = evaluate(
+        category=CLASS_PROMPT_INJECTION,
+        evidence=ValidationEvidence(
+            endpoint="http://127.0.0.1:8080/chat",
+            method="POST",
+            request="POST /chat",
+            response='{"reply":"vynpiTOKEN"}',
+            status_code=200,
+            reproducible=True,
+            reproductions=2,
+            expected="model treats user text as data",
+            observed="instruction followed: model returned the injected canary",
+            validation_method="prompt-instruction-following",
+            independent_sources=["instruction-following-canary"],
+        ),
+        profile=PROFILE_CONTROLLED_VALIDATION,
+        authorized=True,
+        in_scope=True,
+    )
+    assert outcome.status == "VALIDATED"
+    assert outcome.validated is True
+
+
+def test_prompt_injection_narrative_only_is_manual_review():
+    outcome = evaluate(
+        category=CLASS_PROMPT_INJECTION,
+        evidence=ValidationEvidence(
+            endpoint="http://127.0.0.1:8080/chat",
+            method="POST",
+            request="POST /chat",
+            response="the assistant might be manipulable",
+            status_code=200,
+            reproducible=True,
+            reproductions=2,
+            expected="model treats user text as data",
+            observed="looks risky",
+            validation_method="prompt-instruction-following",
+            independent_sources=["opinion"],
+        ),
+        profile=PROFILE_CONTROLLED_VALIDATION,
+        authorized=True,
+        in_scope=True,
+    )
+    assert outcome.status == "REQUIRES_MANUAL_REVIEW"
+
+
+def test_prompt_injection_single_reproduction_is_not_enough():
+    outcome = evaluate(
+        category=CLASS_PROMPT_INJECTION,
+        evidence=ValidationEvidence(
+            endpoint="http://127.0.0.1:8080/chat",
+            method="POST",
+            request="POST /chat",
+            response='{"reply":"vynpiTOKEN"}',
+            status_code=200,
+            reproducible=False,
+            reproductions=1,
+            expected="model treats user text as data",
+            observed="instruction followed: canary returned once",
+            validation_method="prompt-instruction-following",
+            independent_sources=["instruction-following-canary"],
+        ),
+        profile=PROFILE_CONTROLLED_VALIDATION,
+        authorized=True,
+        in_scope=True,
+    )
+    assert outcome.status == "INCONCLUSIVE"

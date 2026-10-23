@@ -81,6 +81,17 @@ class CheckContext:
             )
         return self.client.get(url, headers=headers)
 
+    def post_json(self, url: str, payload: Any,
+                  *, headers: Mapping[str, str] | None = None) -> HttpResponse:
+        """Budget-aware JSON POST through the shared client."""
+        if self.stop is not None and self.stop():
+            return HttpResponse(ok=False, url=url, error="assessment stopped", error_kind="cancelled")
+        if self.consume is not None and not self.consume():
+            return HttpResponse(
+                ok=False, url=url, error="request budget exhausted", error_kind="budget"
+            )
+        return self.client.post_json(url, payload, headers=headers)
+
 
 @dataclass
 class CheckFinding:

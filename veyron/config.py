@@ -92,6 +92,8 @@ class DASTConfig:
     callback_url: str | None = None
     access_control_rules: list[dict[str, Any]] = field(default_factory=list)
     identities: list[dict[str, Any]] = field(default_factory=list)
+    # LLM-enabled endpoints explicitly nominated for prompt-injection probing.
+    prompt_injection_endpoints: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -179,7 +181,7 @@ class Config:
                       "profile", "max_pages", "timeout_seconds", "max_redirects",
                       "permitted_paths", "exclusions", "evidence_retention", "stop_file",
                       "lab_environment", "callback_url", "access_control_rules",
-                      "identities"):
+                      "identities", "prompt_injection_endpoints"):
                 if k in da:
                     setattr(self.dast, k, da[k])
         net = data.get("network")

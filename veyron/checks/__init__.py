@@ -12,7 +12,9 @@ from typing import Any
 
 from .access_control import check_access_control
 from .base import CallbackVerifier, CheckContext, CheckFinding
+from .command_injection import check_command_injection
 from .path_traversal import check_path_traversal
+from .prompt_injection import check_prompt_injection
 from .sqli import check_sqli
 from .ssrf import check_ssrf
 from .ssti import check_ssti
@@ -26,7 +28,9 @@ __all__ = [
 ]
 
 
-def run_checks(ctx: CheckContext, urls: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
+def run_checks(ctx: CheckContext, urls: list[str],
+               prompt_injection_endpoints: list[str] | None = None,
+               ) -> tuple[list[dict[str, Any]], list[str]]:
     """Run profile-appropriate checks and return (findings, errors)."""
     if not ctx.allowed():
         return [], []
@@ -42,13 +46,23 @@ def run_checks(ctx: CheckContext, urls: list[str]) -> tuple[list[dict[str, Any]]
             unique_urls.append(url)
     unique_urls = unique_urls[:50]
 
+    # Prompt-injection probing only targets explicitly nominated endpoints.
+    pi_endpoints: list[str] = []
+    seen_pi: set[str] = set()
+    for endpoint in prompt_injection_endpoints or []:
+        if endpoint and endpoint not in seen_pi:
+            seen_pi.add(endpoint)
+            pi_endpoints.append(endpoint)
+
     for label, func in (
         ("xss", lambda: check_xss(ctx, unique_urls)),
         ("sqli", lambda: check_sqli(ctx, unique_urls)),
         ("ssti", lambda: check_ssti(ctx, unique_urls)),
         ("path-traversal", lambda: check_path_traversal(ctx, unique_urls)),
+        ("command-injection", lambda: check_command_injection(ctx, unique_urls)),
         ("ssrf", lambda: check_ssrf(ctx, unique_urls)),
         ("access-control", lambda: check_access_control(ctx)),
+        ("prompt-injection", lambda: check_prompt_injection(ctx, pi_endpoints)),
     ):
         try:
             findings.extend(func())

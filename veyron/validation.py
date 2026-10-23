@@ -35,6 +35,7 @@ VALIDATION_METHODS = {
     "harmless-file-canary",
     "static-dataflow",
     "version-correlation",
+    "prompt-instruction-following",
 }
 
 # Vulnerability classes used by the validation engine and reports.  Keep
@@ -46,6 +47,7 @@ CLASS_FILE_HANDLING = "file-handling"
 CLASS_AUTH_SESSION = "authentication-session"
 CLASS_DEPENDENCY = "dependency"
 CLASS_CONFIGURATION = "configuration"
+CLASS_PROMPT_INJECTION = "prompt-injection"
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,10 @@ REQUIREMENTS: dict[str, Requirement] = {
         frozenset({"passive-observation"}), requires_observation=True,
         validates_in_passive=True,
     ),
+    CLASS_PROMPT_INJECTION: Requirement(
+        frozenset({"prompt-instruction-following", "response-differential"}),
+        requires_reproduction=True,
+    ),
 }
 
 # Observed, non-destructive proof that a control was actually exercised.  A
@@ -103,6 +109,8 @@ OBSERVABLE_MARKERS = (
     "vyn-reflect",
     "resolved path",
     "callback",
+    "instruction followed",
+    "command output",
     "different response",
     "same content",
 )
@@ -214,6 +222,10 @@ def _class_key(value: str) -> str:
         "ssti": CLASS_INJECTION,
         "path-traversal": CLASS_INJECTION,
         "deserialization": CLASS_INJECTION,
+        "command-injection": CLASS_INJECTION,
+        "prompt-injection": CLASS_PROMPT_INJECTION,
+        "llm-prompt-injection": CLASS_PROMPT_INJECTION,
+        "indirect-prompt-injection": CLASS_PROMPT_INJECTION,
         "access-control": CLASS_ACCESS_CONTROL,
         "idor": CLASS_ACCESS_CONTROL,
         "ssrf": CLASS_SSRF,
@@ -351,6 +363,7 @@ def evaluate(
         CLASS_ACCESS_CONTROL,
         CLASS_SSRF,
         CLASS_FILE_HANDLING,
+        CLASS_PROMPT_INJECTION,
     }
     if marker_required and not any(marker in blob for marker in OBSERVABLE_MARKERS):
         return ValidationOutcome(

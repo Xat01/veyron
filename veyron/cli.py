@@ -106,6 +106,9 @@ def _build_parser() -> argparse.ArgumentParser:
     dast.add_argument("--report-dir", default=None, metavar="DIR",
                       help="Write markdown/json/sarif/html reports, per-finding "
                            "reports and a disclosure draft to DIR")
+    dast.add_argument("--llm-endpoint", action="append", default=[], metavar="URL",
+                      help="Nominated LLM-enabled endpoint to probe for prompt "
+                           "injection (repeatable; must be in scope)")
     return p
 
 
@@ -428,6 +431,10 @@ def cmd_dast(args: argparse.Namespace, cfg: Config) -> int:
         cfg.dast.lab_environment = True
     if getattr(args, "evidence_retention", None):
         cfg.dast.evidence_retention = args.evidence_retention
+    if getattr(args, "llm_endpoint", None):
+        cfg.dast.prompt_injection_endpoints = (
+            list(cfg.dast.prompt_injection_endpoints) + list(args.llm_endpoint)
+        )
 
     result = run_dast(
         cfg.dast,

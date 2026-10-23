@@ -7,6 +7,7 @@ supposed to use.
 
 from __future__ import annotations
 
+import json
 import threading
 import urllib.parse
 import urllib.request
@@ -32,7 +33,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib hook
         parsed = urllib.parse.urlsplit(self.path)
         query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
-        value = query.get("q", "")
+        value = query.get("q") or query.get("cmd") or query.get("url") or ""
         if parsed.path == "/echo":
             body = f"<html><body>Results: {value}</body></html>".encode()
             status = 200
@@ -69,6 +70,26 @@ class _Handler(BaseHTTPRequestHandler):
 
             body = f"<html><body>opaque value: {html.escape(value)}</body></html>".encode()
             status = 200
+        elif parsed.path == "/exec":
+            # Deliberately simulates a shell that evaluates a value: the bug
+            # under test.  We deterministically fold the constant arithmetic
+            # so the fixture is portable and never depends on a real shell.
+            import re as _re
+
+            def _fold(match: "_re.Match[str]") -> str:
+                try:
+                    return str(eval(match.group(1), {"__builtins__": {}}, {}))  # noqa: S307
+                except Exception:  # noqa: BLE001 - fixture only
+                    return match.group(0)
+
+            folded = _re.sub(r"\$\(\(([0-9+\-* ]+)\)\)", _fold, value)
+            body = f"<html><body>output: {folded}</body></html>".encode()
+            status = 200
+        elif parsed.path == "/exec-safe":
+            import html
+
+            body = f"<html><body>output: {html.escape(value)}</body></html>".encode()
+            status = 200
         elif parsed.path == "/fetch":
             # Deliberately fetches user-supplied URLs: the bug under test.
             target = query.get("url", value)
@@ -83,6 +104,33 @@ class _Handler(BaseHTTPRequestHandler):
             status = 404
         self.send_response(status)
         self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802 - stdlib hook
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
+        try:
+            prompt = json.loads(raw).get("prompt", "") if raw else ""
+        except json.JSONDecodeError:
+            prompt = ""
+        # /chat follows injected instructions (the bug under test).
+        # /chat-safe treats the text as data only.
+        token = ""
+        for word in prompt.replace(":", " ").split():
+            if word.startswith("vynpi"):
+                token = word
+                break
+        if self.path.startswith("/chat-safe"):
+            body = json.dumps({"reply": "OK"}).encode()
+        elif self.path.startswith("/chat"):
+            body = json.dumps({"reply": token or "OK"}).encode()
+        else:
+            body = b"not found"
+        status = 200 if self.path.startswith("/chat") else 404
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -259,3 +307,46 @@ def test_opaque_path_parameter_is_not_a_finding(site):
     s = spec(PROFILE_CONTROLLED_VALIDATION, site)
     findings, _ = run_checks(context(s), [site + "/traverse-safe?q=file"])
     assert [f for f in findings if f["category"] == "path-traversal"] == []
+
+
+def test_command_injection_reports_folded_expression(site):
+    s = spec(PROFILE_CONTROLLED_VALIDATION, site)
+    findings, _ = run_checks(context(s), [site + "/exec?cmd=whoami"])
+    cmdi = [f for f in findings if f["category"] == "command-injection"]
+    assert cmdi, findings
+    assert cmdi[0]["validation_status"] == "VALIDATED"
+    assert "command output" in cmdi[0]["validation_evidence"]["observed"].lower()
+
+
+def test_opaque_command_parameter_is_not_a_finding(site):
+    s = spec(PROFILE_CONTROLLED_VALIDATION, site)
+    findings, _ = run_checks(context(s), [site + "/exec-safe?cmd=whoami"])
+    assert [f for f in findings if f["category"] == "command-injection"] == []
+
+
+def test_prompt_injection_requires_nominated_endpoint(site):
+    s = spec(PROFILE_CONTROLLED_VALIDATION, site)
+    # Not nominated: no prompt-injection findings even though the endpoint exists.
+    findings, _ = run_checks(context(s), [site + "/echo?q=hi"])
+    assert [f for f in findings if f["category"] == "prompt-injection"] == []
+
+
+def test_prompt_injection_reports_instruction_following(site):
+    s = spec(PROFILE_CONTROLLED_VALIDATION, site)
+    findings, _ = run_checks(
+        context(s), [site + "/echo?q=hi"],
+        prompt_injection_endpoints=[site + "/chat"],
+    )
+    pi = [f for f in findings if f["category"] == "prompt-injection"]
+    assert pi, findings
+    assert pi[0]["validation_status"] == "VALIDATED"
+    assert "instruction followed" in pi[0]["validation_evidence"]["observed"].lower()
+
+
+def test_prompt_injection_safe_endpoint_is_not_a_finding(site):
+    s = spec(PROFILE_CONTROLLED_VALIDATION, site)
+    findings, _ = run_checks(
+        context(s), [site + "/echo?q=hi"],
+        prompt_injection_endpoints=[site + "/chat-safe"],
+    )
+    assert [f for f in findings if f["category"] == "prompt-injection"] == []

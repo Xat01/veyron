@@ -605,7 +605,9 @@ def run_dast(cfg: DASTConfig, *, target_url: str, execute: bool, authorized: boo
             callback=callback,
         )
         try:
-            extra, check_errors = run_checks(ctx, urls)
+            extra, check_errors = run_checks(
+                ctx, urls, prompt_injection_endpoints=list(cfg.prompt_injection_endpoints)
+            )
             result.findings.extend(extra)
             result.errors.extend(check_errors)
         except Exception as exc:  # noqa: BLE001 - never lose the passive results

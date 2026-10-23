@@ -41,9 +41,12 @@
   `evidence_retention`).
 - Modular, profile-gated web checks (`veyron/checks/`): reflected-marker XSS,
   SQL-injection error differential, SSTI arithmetic, path traversal
-  (resolved-path / error differential), SSRF via an operator-controlled
-  **loopback** callback, and operator-declared broken access control. Each
-  reports only what it observed; none claims `VALIDATED` on its own.
+  (resolved-path / error differential), non-destructive command injection
+  (shell-evaluated constant / error differential), SSRF via an
+  operator-controlled **loopback** callback, operator-declared broken access
+  control, and benign prompt injection against explicitly nominated LLM
+  endpoints. Each reports only what it observed; none claims `VALIDATED` on
+  its own.
 - Professional reporting: per-finding reports and an editable
   responsible-disclosure draft (never sent by VEYRON); every finding carries
   validation evidence, expected vs observed behaviour, impact, preconditions,
@@ -55,10 +58,9 @@
   calls) with `VEYRON_OFFLINE` and per-integration overrides; AI endpoint
   policy (`allow_remote`/`allowed_hosts`) enforced independently of website
   scope; configurable OSV endpoint (`osv_base_url`).
-- 302 unit tests (127 pre-existing + network-layer, migration, assessment,
+- 310 unit tests (127 pre-existing + network-layer, migration, assessment,
   validation, web-check, reporting, dashboard and CLI tests); integration tests
-  run when real scanners are installed.
-- Shared network layer (`veyron/net/`): one HTTP client for every outbound
+  run when real scanners are installed.- Shared network layer (`veyron/net/`): one HTTP client for every outbound
   request — scope enforcement, DNS resolution + destination-address
   validation (cloud-metadata blocked by default), redirect validation,
   request budgets, timeouts, cancellation, TLS verification on by default.

@@ -45,7 +45,7 @@ Engine.
 `veyron/report/core.py` — Markdown / JSON / SARIF / HTML report rendering, per-finding reports, disclosure draft
 `veyron/assessment.py` — assessment profiles and the `AssessmentSpec` authorisation model
 `veyron/validation.py` — evidence-driven validation engine (per-class requirements, deterministic verdicts)
-`veyron/checks/` — modular, profile-gated web checks (xss, sqli, ssti, path_traversal, ssrf, access_control) + loopback callback listener
+`veyron/checks/` — modular, profile-gated web checks (xss, sqli, ssti, path_traversal, command_injection, ssrf, access_control, prompt_injection) + loopback callback listener
 `veyron/net/client.py` — shared HTTP client (scope, proxy routing, budgets, TLS)
 `veyron/net/scope.py` — scope model: host/port/path authorisation, address validation
 `veyron/net/proxy.py` — proxy configuration (HTTP/HTTPS/SOCKS5), credential masking
