@@ -109,6 +109,8 @@ class DASTResult:
     budget: dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     authorization: dict[str, Any] = field(default_factory=dict)
+    # Automatic exploit-validation stage (see veyron.exploitation).
+    validation: dict[str, Any] = field(default_factory=dict)
 
 
 def host_in_allowlist(url: str, allowlist: list[str]) -> bool:
@@ -497,7 +499,9 @@ def _safe_request(url: str, cfg: DASTConfig, budget: Budget, audit: list[AuditRe
 
 
 def run_dast(cfg: DASTConfig, *, target_url: str, execute: bool, authorized: bool,
-             profile: str | None = None) -> DASTResult:
+             profile: str | None = None,
+             validation_settings: dict[str, Any] | None = None,
+             assessment_id: str = "") -> DASTResult:
     """Run (or plan) controlled dynamic checks against an authorised target."""
 
     cfg.profile = normalize_profile(profile or cfg.profile).lower().replace("_", "-")
@@ -610,6 +614,24 @@ def run_dast(cfg: DASTConfig, *, target_url: str, execute: bool, authorized: boo
             )
             result.findings.extend(extra)
             result.errors.extend(check_errors)
+            if validation_settings and execute:
+                from .exploitation.integration import run_validation_stage
+
+                try:
+                    v_client = _build_http_client(cfg, spec)
+                    result.validation = run_validation_stage(
+                        findings=result.findings,
+                        spec=spec,
+                        client=v_client,
+                        assessment_id=assessment_id or "dast",
+                        settings=validation_settings,
+                        report_dir=validation_settings.get("report_dir"),
+                        callback=callback,
+                    )
+                except Exception as exc:  # noqa: BLE001 - findings must survive
+                    result.errors.append(
+                        f"validation stage failed: {type(exc).__name__}: {exc}"
+                    )
         except Exception as exc:  # noqa: BLE001 - never lose the passive results
             result.errors.append(f"active checks failed: {type(exc).__name__}: {exc}")
         finally:

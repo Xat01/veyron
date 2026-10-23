@@ -97,6 +97,27 @@ class DASTConfig:
 
 
 @dataclass
+class ValidationConfig:
+    """Automatic exploit-validation settings (see veyron.exploitation)."""
+
+    enabled: bool = False
+    policy: str = "AUTO_SAFE"          # AUTO_SAFE | APPROVAL_REQUIRED | LAB_ONLY
+    max_executions: int = 25
+    max_concurrency: int = 1
+    deadline_seconds: int = 300
+    report_dir: str | None = None
+    evidence_store: str | None = None
+    lab_runtime: str = "docker"
+    lab_fixture_image: str = "veyron/lab-vulnerable-web:local"
+    approvals_path: str | None = None
+    # Non-secret, operator-supplied test surfaces (never derived from a response).
+    upload_endpoint: str | None = None
+    upload_field: str = "file"
+    upload_retrieval_template: str | None = None
+    llm_endpoints: list[str] = field(default_factory=list)
+
+
+@dataclass
 class NetworkConfig:
     """Shared network layer settings (proxy routing, timeouts, budgets)."""
 
@@ -117,6 +138,7 @@ class Config:
     ai: AIConfig = field(default_factory=AIConfig)
     scanners: ScannerConfig = field(default_factory=ScannerConfig)
     dast: DASTConfig = field(default_factory=DASTConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
     proxy: ProxyConfig = field(default_factory=ProxyConfig)
     exclusions: list[str] = field(default_factory=list)
@@ -184,6 +206,14 @@ class Config:
                       "identities", "prompt_injection_endpoints"):
                 if k in da:
                     setattr(self.dast, k, da[k])
+        va = data.get("validation")
+        if isinstance(va, dict):
+            for k in ("enabled", "policy", "max_executions", "max_concurrency",
+                      "deadline_seconds", "report_dir", "evidence_store", "lab_runtime",
+                      "lab_fixture_image", "approvals_path", "upload_endpoint",
+                      "upload_field", "upload_retrieval_template", "llm_endpoints"):
+                if k in va:
+                    setattr(self.validation, k, va[k])
         net = data.get("network")
         if isinstance(net, dict):
             for k in ("timeout_seconds", "verify_tls", "user_agent", "max_requests",
@@ -252,6 +282,20 @@ class Config:
 
     def validate(self) -> list[str]:
         problems: list[str] = []
+        validation = getattr(self, "validation", None)
+        if validation is not None:
+            try:
+                from .exploitation.module import normalize_policy
+
+                normalize_policy(validation.policy)
+            except ValueError as exc:
+                problems.append(f"validation.policy is invalid: {exc}")
+            if validation.max_executions < 0:
+                problems.append("validation.max_executions must be >= 0")
+            if validation.max_concurrency < 1:
+                problems.append("validation.max_concurrency must be >= 1")
+            if validation.deadline_seconds <= 0:
+                problems.append("validation.deadline_seconds must be > 0")
         if self.ai.enabled:
             if not self.ai.base_url.startswith(("http://", "https://")):
                 problems.append("ai.base_url must be an http(s) URL")
@@ -318,7 +362,8 @@ def _env_overrides() -> dict[str, Any]:
     def get(name: str, default: Any = None) -> Any:
         return os.environ.get(ENV_PREFIX + name, default)
 
-    data: dict[str, Any] = {"ai": {}, "scanners": {}, "dast": {}, "network": {}, "proxy": {}}
+    data: dict[str, Any] = {"ai": {}, "scanners": {}, "dast": {}, "network": {},
+                            "proxy": {}, "validation": {}}
     if (v := get("OFFLINE")) is not None:
         data["offline"] = v.strip().lower() in {"1", "true", "yes", "on"}
     if (v := get("AI_ENABLED")) is not None:
@@ -375,6 +420,26 @@ def _env_overrides() -> dict[str, Any]:
         data["dast"]["profile"] = v.strip().lower()
     if (v := get("DAST_FOLLOW_REDIRECTS")) is not None:
         data["dast"]["follow_redirects"] = v.strip().lower() in {"1", "true", "yes", "on"}
+    # Automatic exploit-validation settings.
+    if (v := get("VALIDATION_ENABLED")) is not None:
+        data["validation"]["enabled"] = v.strip().lower() in {"1", "true", "yes", "on"}
+    if (v := get("VALIDATION_POLICY")) is not None:
+        data["validation"]["policy"] = v.strip()
+    if (v := get("VALIDATION_MAX_EXECUTIONS")) is not None:
+        try:
+            data["validation"]["max_executions"] = int(v)
+        except ValueError:
+            pass
+    if (v := get("VALIDATION_LAB_RUNTIME")) is not None:
+        data["validation"]["lab_runtime"] = v.strip()
+    if (v := get("VALIDATION_APPROVALS_PATH")) is not None:
+        data["validation"]["approvals_path"] = v.strip()
+    if (v := get("VALIDATION_REPORT_DIR")) is not None:
+        data["validation"]["report_dir"] = v.strip()
+    if (v := get("VALIDATION_UPLOAD_ENDPOINT")) is not None:
+        data["validation"]["upload_endpoint"] = v.strip()
+    if (v := get("VALIDATION_LLM_ENDPOINTS")) is not None:
+        data["validation"]["llm_endpoints"] = [x.strip() for x in v.split(",") if x.strip()]
     # Network / proxy
     if (v := get("NETWORK_TIMEOUT_SECONDS")) is not None:
         try:

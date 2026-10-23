@@ -109,6 +109,29 @@ def _build_parser() -> argparse.ArgumentParser:
     dast.add_argument("--llm-endpoint", action="append", default=[], metavar="URL",
                       help="Nominated LLM-enabled endpoint to probe for prompt "
                            "injection (repeatable; must be in scope)")
+    dast.add_argument("--validate", action="store_true",
+                      help="After checks, automatically run registered validation "
+                           "modules against the resulting findings")
+    dast.add_argument("--validate-policy", default=None,
+                      choices=["AUTO_SAFE", "APPROVAL_REQUIRED", "LAB_ONLY"],
+                      help="Execution policy for automatic validation "
+                           "(default: AUTO_SAFE)")
+    dast.add_argument("--validate-max-executions", type=int, default=None,
+                      metavar="N", help="Maximum validation module executions")
+    dast.add_argument("--validate-report-dir", default=None, metavar="DIR",
+                      help="Write validation reports and per-finding evidence to DIR")
+
+    approvals = sub.add_parser("approvals", help="Record and list validation approvals",
+                               parents=[common])
+    approvals_sub = approvals.add_subparsers(dest="approvals_command", required=True)
+    approvals_sub.add_parser("list", help="List recorded approvals", parents=[common])
+    ap_add = approvals_sub.add_parser("add", help="Record an approval for one module",
+                                      parents=[common])
+    ap_add.add_argument("--assessment", required=True, metavar="ID")
+    ap_add.add_argument("--finding", required=True, metavar="ID")
+    ap_add.add_argument("--module", required=True, metavar="MODULE")
+    ap_add.add_argument("--actor", default="operator")
+    ap_add.add_argument("--note", default="")
     return p
 
 
@@ -436,12 +459,40 @@ def cmd_dast(args: argparse.Namespace, cfg: Config) -> int:
             list(cfg.dast.prompt_injection_endpoints) + list(args.llm_endpoint)
         )
 
+    validation_settings: dict[str, object] | None = None
+    if getattr(args, "validate", False) or cfg.validation.enabled:
+        validation_settings = {
+            "policy": getattr(args, "validate_policy", None) or cfg.validation.policy,
+            "max_executions": (getattr(args, "validate_max_executions", None)
+                               or cfg.validation.max_executions),
+            "deadline_seconds": cfg.validation.deadline_seconds,
+            "report_dir": (getattr(args, "validate_report_dir", None)
+                           or cfg.validation.report_dir),
+            "evidence_store": cfg.validation.evidence_store,
+            "approvals_path": cfg.validation.approvals_path,
+            "upload_endpoint": cfg.validation.upload_endpoint,
+            "upload_field": cfg.validation.upload_field,
+            "upload_retrieval_template": cfg.validation.upload_retrieval_template,
+            "llm_endpoints": (list(cfg.validation.llm_endpoints)
+                              + list(cfg.dast.prompt_injection_endpoints)),
+        }
+
+    import uuid as _uuid
+
+    assessment_id = _uuid.uuid4().hex[:12]
+    if validation_settings is not None and not validation_settings.get("report_dir"):
+        validation_settings["report_dir"] = str(
+            cfg.reports_dir / assessment_id / "validation"
+        )
+
     result = run_dast(
         cfg.dast,
         target_url=args.target_url,
         execute=execute,
         authorized=authorized,
         profile=getattr(args, "profile", None),
+        validation_settings=validation_settings,
+        assessment_id=assessment_id,
     )
     # DASTResult is a dataclass: serialise with asdict() and read fields
     # via attribute access (there is no .get()).
@@ -524,6 +575,37 @@ def cmd_dashboard(args: argparse.Namespace, cfg: Config) -> int:
     return serve(cfg, host=host, port=port)
 
 
+def cmd_approvals(args: argparse.Namespace, cfg: Config) -> int:
+    from .exploitation.policy import ApprovalStore
+
+    store = ApprovalStore(cfg.validation.approvals_path)
+    if args.approvals_command == "add":
+        entry = store.record(
+            assessment_id=args.assessment,
+            finding_id=args.finding,
+            module_id=args.module,
+            actor=args.actor,
+            note=args.note,
+        )
+        if getattr(args, "json", False):
+            print(json.dumps(entry, indent=2))
+        else:
+            print(f"recorded approval: {entry['module_id']} for {entry['finding_id']} "
+                  f"({entry['assessment_id']}) by {entry['actor']}")
+        return 0
+    entries = store.entries()
+    if getattr(args, "json", False):
+        print(json.dumps(entries, indent=2))
+    elif not entries:
+        print("no approvals recorded")
+    else:
+        for e in entries:
+            print(f"{e.get('at','?')}  {e.get('assessment_id','?')}  "
+                  f"{e.get('finding_id','?')}  {e.get('module_id','?')}  "
+                  f"by {e.get('actor','?')}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -539,6 +621,7 @@ def main(argv: list[str] | None = None) -> int:
         "proxy": cmd_proxy,
         "dashboard": cmd_dashboard,
         "dast": cmd_dast,
+        "approvals": cmd_approvals,
     }
     handler = handlers.get(args.command)
     if handler is None:
