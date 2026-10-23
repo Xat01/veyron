@@ -49,6 +49,12 @@ and writes human-readable and machine-readable reports.
   finding carries validation evidence, expected vs observed behaviour,
   impact, prerequisites, safe reproduction, remediation and verification
   guidance.
+- **Automatic exploit validation** — `dast --validate` turns each in-scope
+  finding into a bounded validation attempt: module selection, policy gate
+  (`AUTO_SAFE` / `APPROVAL_REQUIRED` / `LAB_ONLY`), execution, separate result
+  verification, redacted evidence and automatic reports. Classes without a
+  reliable non-destructive validator (authentication/session, dependency,
+  configuration) are reported as unsupported rather than faked.
 - **Finding lifecycle** — DETECTED → ANALYSED → CORROBORATED → VALIDATED
   (evidence required); FALSE_POSITIVE and INCONCLUSIVE states retained.
 - **Reports** — Markdown, JSON, SARIF; executive summary, scope, failures,

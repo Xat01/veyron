@@ -46,6 +46,15 @@ Engine.
 `veyron/assessment.py` — assessment profiles and the `AssessmentSpec` authorisation model
 `veyron/validation.py` — evidence-driven validation engine (per-class requirements, deterministic verdicts)
 `veyron/checks/` — modular, profile-gated web checks (xss, sqli, ssti, path_traversal, command_injection, ssrf, access_control, prompt_injection) + loopback callback listener
+`veyron/exploitation/states.py` — explicit, auditable validation-attempt lifecycle
+`veyron/exploitation/module.py` — validation-module interface, registry, execution policies
+`veyron/exploitation/modules.py` — nine non-destructive validation modules
+`veyron/exploitation/policy.py` — AUTO_SAFE / APPROVAL_REQUIRED / LAB_ONLY gating + approval ledger
+`veyron/exploitation/pipeline.py` — normalize → plan → policy → execute → verify → evidence → reports
+`veyron/exploitation/verification.py` — five-way result verification
+`veyron/exploitation/evidence.py` — structured, redacted execution records (JSONL)
+`veyron/exploitation/lab.py` — isolated reproduction backend (no host fallback)
+`veyron/exploitation/reporting.py` — automatic per-finding and combined validation reports
 `veyron/net/client.py` — shared HTTP client (scope, proxy routing, budgets, TLS)
 `veyron/net/scope.py` — scope model: host/port/path authorisation, address validation
 `veyron/net/proxy.py` — proxy configuration (HTTP/HTTPS/SOCKS5), credential masking
@@ -59,6 +68,17 @@ language, never scanner+AI agreement alone). `DETECTED → FALSE_POSITIVE`,
 `INCONCLUSIVE → DETECTED/CORROBORATED/VALIDATED/FALSE_POSITIVE`, and
 `VALIDATED → INCONCLUSIVE` transitions permitted. Every transition records
 actor, reason, and timestamp.
+
+Validation *attempts* have their own, finer lifecycle
+(`veyron/exploitation/states.py`):
+`DISCOVERED → ANALYSED → VALIDATION_PLANNED → POLICY_CHECKED →
+READY_TO_EXECUTE → EXECUTING → RESULT_VERIFICATION →
+REPRODUCED/FAILED/INCONCLUSIVE → REPORT_GENERATED`, with explicit
+`BLOCKED_BY_SCOPE`, `APPROVAL_REQUIRED`, `UNSUPPORTED`, `CANCELLED`,
+`TIMED_OUT`, `ENVIRONMENT_UNAVAILABLE` exits. Illegal transitions raise; the
+attempt history is append-only. An attempt outcome is translated into a finding
+state only through the existing evidence engine, and a module running is never
+by itself treated as confirmation.
 
 ## SARIF
 

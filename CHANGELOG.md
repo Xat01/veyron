@@ -87,6 +87,24 @@
 - Original SVG logo suite and brand specification.
 - PolyForm Noncommercial licence (author: Xat01); GitHub Actions workflow for CI (`tests.yml`).
 
+## Automatic exploit validation
+
+- New `veyron/exploitation/` package: explicit per-attempt lifecycle, module
+  interface with declared capabilities, registry, three execution policies
+  (AUTO_SAFE, APPROVAL_REQUIRED, LAB_ONLY), separated verification, structured
+  and redacted evidence records, automatic per-finding and combined reports.
+- Nine non-destructive validation modules (XSS, SQLi indicators, path
+  traversal, command injection, SSTI, SSRF via loopback callback, broken access
+  control, file-upload canary, prompt injection). Authentication/session,
+  dependency and configuration classes are reported as unsupported rather than
+  faked.
+- `dast --validate` runs validation on the findings it just produced;
+  `veyron approvals add|list` records APPROVAL_REQUIRED approvals; evidence and
+  reports default to the assessment report directory.
+- Lab backend runs reviewed fixtures only, with reported isolation, and returns
+  `ENVIRONMENT_UNAVAILABLE` instead of falling back to the host.
+- Tests: 40 new (`tests/test_exploitation.py`), full suite 350 passing.
+
 ## Planned next
 
 - README screenshots from real scans (once dashboard has findings screenshots).
